@@ -116,6 +116,81 @@ const storeTasaCero = async (req, res, next) => {
   }
 };
 
+const updateTasaCero = async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const compra = await CompraTasaCero.findByPk(req.params.id, {
+      include: [{ model: CuotaMensual, as: 'cuotas' }],
+    });
+    if (!compra) { await t.rollback(); return res.status(404).json({ error: 'Compra no encontrada' }); }
+
+    const { tarjeta_id, nombre, monto_total, total_cuotas, fecha_compra } = req.body;
+
+    // Detectar si cambia algún campo financiero que afecte las cuotas
+    const financialChanged =
+      (tarjeta_id   !== undefined && parseInt(tarjeta_id)       !== compra.tarjeta_id)   ||
+      (monto_total  !== undefined && parseFloat(monto_total)    !== parseFloat(compra.monto_total)) ||
+      (total_cuotas !== undefined && parseInt(total_cuotas)     !== compra.total_cuotas)  ||
+      (fecha_compra !== undefined && fecha_compra               !== compra.fecha_compra);
+
+    if (financialChanged) {
+      const cuotasPagadas = compra.cuotas.filter(c => c.estado === 'pagada').length;
+      if (cuotasPagadas > 0) {
+        await t.rollback();
+        return res.status(422).json({
+          error: `No se pueden modificar los montos o fechas de "${compra.nombre}": ya tiene ${cuotasPagadas} cuota(s) pagada(s). Solo puedes editar la descripción.`,
+        });
+      }
+
+      // Recalcular cuotas desde cero
+      const newTarjetaId   = tarjeta_id   !== undefined ? parseInt(tarjeta_id)    : compra.tarjeta_id;
+      const newMontoTotal  = monto_total  !== undefined ? parseFloat(monto_total) : parseFloat(compra.monto_total);
+      const newTotalCuotas = total_cuotas !== undefined ? parseInt(total_cuotas)  : compra.total_cuotas;
+      const newFecha       = fecha_compra !== undefined ? fecha_compra            : compra.fecha_compra;
+
+      const tarjeta = await Tarjeta.findByPk(newTarjetaId, { transaction: t });
+      if (!tarjeta) { await t.rollback(); return res.status(404).json({ error: 'Tarjeta no encontrada' }); }
+
+      await CuotaMensual.destroy({ where: { tasa_cero_id: compra.id }, transaction: t });
+
+      const montoCuota = Math.round((newMontoTotal / newTotalCuotas) * 100) / 100;
+      const fechas     = calcFechasPago(newFecha, tarjeta.dia_pago, newTotalCuotas);
+
+      await CuotaMensual.bulkCreate(
+        fechas.map((fecha, i) => ({
+          tasa_cero_id:        compra.id,
+          numero_cuota:        i + 1,
+          monto_cuota:         montoCuota,
+          fecha_estimada_pago: fecha,
+          estado:              'pendiente',
+        })),
+        { transaction: t }
+      );
+
+      await compra.update(
+        { tarjeta_id: newTarjetaId, nombre: nombre ?? compra.nombre, monto_total: newMontoTotal, total_cuotas: newTotalCuotas, fecha_compra: newFecha },
+        { transaction: t }
+      );
+    } else {
+      // Solo actualizar nombre (seguro sin afectar cuotas)
+      await compra.update({ nombre: nombre ?? compra.nombre }, { transaction: t });
+    }
+
+    await t.commit();
+
+    const result = await CompraTasaCero.findByPk(compra.id, {
+      include: [
+        { model: Tarjeta,      as: 'tarjeta', attributes: ['id', 'nombre', 'banco', 'dia_pago'] },
+        { model: CuotaMensual, as: 'cuotas',  order: [['numero_cuota', 'ASC']] },
+      ],
+    });
+    res.json(result);
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
+};
+
 const destroyTasaCero = async (req, res, next) => {
   try {
     const compra = await CompraTasaCero.findByPk(req.params.id);
@@ -127,4 +202,4 @@ const destroyTasaCero = async (req, res, next) => {
   }
 };
 
-module.exports = { indexNormales, storeNormal, destroyNormal, indexTasaCero, storeTasaCero, destroyTasaCero };
+module.exports = { indexNormales, storeNormal, destroyNormal, indexTasaCero, storeTasaCero, updateTasaCero, destroyTasaCero };

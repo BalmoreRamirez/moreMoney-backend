@@ -9,8 +9,9 @@ router.get('/normales',      ctrl.indexNormales);
 router.post('/normales',     ctrl.storeNormal);
 router.delete('/normales/:id', ctrl.destroyNormal);
 
-router.get('/tasa-cero',       ctrl.indexTasaCero);
-router.post('/tasa-cero',      ctrl.storeTasaCero);
+router.get('/tasa-cero',        ctrl.indexTasaCero);
+router.post('/tasa-cero',       ctrl.storeTasaCero);
+router.put('/tasa-cero/:id',    ctrl.updateTasaCero);
 router.delete('/tasa-cero/:id', ctrl.destroyTasaCero);
 
 module.exports = router;
