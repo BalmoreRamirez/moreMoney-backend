@@ -14,6 +14,20 @@ function monthRange(year, month) {
   };
 }
 
+// Calcula el año/mes donde caerá el próximo pago real de una tarjeta
+function nextPagoYearMonth(diaPago) {
+  const now = new Date();
+  const y   = now.getFullYear();
+  const m   = now.getMonth() + 1; // 1-indexed
+  const d   = now.getDate();
+  // Si el día de pago de este mes todavía no ha pasado, el próximo pago es este mes
+  if (d <= diaPago) return { pagoYear: y, pagoMonth: m };
+  // Si ya pasó, el próximo pago es el mes siguiente
+  return m + 1 > 12
+    ? { pagoYear: y + 1, pagoMonth: 1 }
+    : { pagoYear: y,     pagoMonth: m + 1 };
+}
+
 // GET /api/calendario?year=YYYY&month=MM
 const getCalendario = async (req, res, next) => {
   try {
@@ -33,10 +47,16 @@ const getCalendario = async (req, res, next) => {
         banco:          t.banco,
       });
 
-      const diaPago        = Math.min(t.dia_pago, lastDay);
-      const pendingNormales = await CompraNormal.count({
-        where: { tarjeta_id: t.id, estado: 'pendiente' },
-      });
+      const diaPago = Math.min(t.dia_pago, lastDay);
+
+      // Las compras normales pendientes solo se muestran en el mes donde
+      // cae el próximo día de pago real (no en todos los meses)
+      const { pagoYear, pagoMonth } = nextPagoYearMonth(t.dia_pago);
+      const esElMesDePago = year === pagoYear && month === pagoMonth;
+      const pendingNormales = esElMesDePago
+        ? await CompraNormal.count({ where: { tarjeta_id: t.id, estado: 'pendiente' } })
+        : 0;
+
       const cuotasEnMes = await CuotaMensual.count({
         where: { estado: 'pendiente', fecha_estimada_pago: { [Op.between]: [fechaInicio, fechaFin] } },
         include: [{
