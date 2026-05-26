@@ -94,13 +94,14 @@ const getDetallePago = async (req, res, next) => {
     const monthInt = parseInt(month);
 
     const { fechaInicio, fechaFin } = monthRange(yearInt, monthInt);
+    const ciclo = billingCycleForPagoMonth(yearInt, monthInt, tarjeta.dia_corte, tarjeta.dia_pago);
 
-    // Compras normales pendientes del mes (según fecha_compra)
+    // Compras normales pendientes del ciclo facturado asociado al pago del mes.
     const compras_normales = await CompraNormal.findAll({
       where: {
         tarjeta_id,
         estado: 'pendiente',
-        fecha_compra: { [Op.between]: [fechaInicio, fechaFin] },
+        fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
       },
       order: [['fecha_compra', 'ASC']],
     });
@@ -118,7 +119,16 @@ const getDetallePago = async (req, res, next) => {
     const total_normales = compras_normales.reduce((s, c) => s + parseFloat(c.monto), 0);
     const total_cuotas   = cuotas.reduce((s, c) => s + parseFloat(c.monto_cuota), 0);
 
-    res.json({ tarjeta, compras_normales, cuotas, total_normales, total_cuotas, total: total_normales + total_cuotas });
+    res.json({
+      tarjeta,
+      ciclo_inicio: ciclo.fechaInicio,
+      ciclo_fin:    ciclo.fechaFin,
+      compras_normales,
+      cuotas,
+      total_normales,
+      total_cuotas,
+      total: total_normales + total_cuotas,
+    });
   } catch (err) { next(err); }
 };
 
