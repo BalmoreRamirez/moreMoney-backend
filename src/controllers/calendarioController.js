@@ -49,13 +49,14 @@ const getCalendario = async (req, res, next) => {
 
       const diaPago = Math.min(t.dia_pago, lastDay);
 
-      // Las compras normales pendientes solo se muestran en el mes donde
-      // cae el próximo día de pago real (no en todos los meses)
-      const { pagoYear, pagoMonth } = nextPagoYearMonth(t.dia_pago);
-      const esElMesDePago = year === pagoYear && month === pagoMonth;
-      const pendingNormales = esElMesDePago
-        ? await CompraNormal.count({ where: { tarjeta_id: t.id, estado: 'pendiente' } })
-        : 0;
+      // Compras normales pendientes del mes (según fecha_compra)
+      const pendingNormales = await CompraNormal.count({
+        where: {
+          tarjeta_id: t.id,
+          estado: 'pendiente',
+          fecha_compra: { [Op.between]: [fechaInicio, fechaFin] },
+        },
+      });
 
       const cuotasEnMes = await CuotaMensual.count({
         where: { estado: 'pendiente', fecha_estimada_pago: { [Op.between]: [fechaInicio, fechaFin] } },
@@ -89,10 +90,18 @@ const getDetallePago = async (req, res, next) => {
     const tarjeta = await Tarjeta.findByPk(tarjeta_id);
     if (!tarjeta) return res.status(404).json({ error: 'Tarjeta no encontrada' });
 
-    const { fechaInicio, fechaFin } = monthRange(parseInt(year), parseInt(month));
+    const yearInt = parseInt(year);
+    const monthInt = parseInt(month);
 
+    const { fechaInicio, fechaFin } = monthRange(yearInt, monthInt);
+
+    // Compras normales pendientes del mes (según fecha_compra)
     const compras_normales = await CompraNormal.findAll({
-      where: { tarjeta_id, estado: 'pendiente' },
+      where: {
+        tarjeta_id,
+        estado: 'pendiente',
+        fecha_compra: { [Op.between]: [fechaInicio, fechaFin] },
+      },
       order: [['fecha_compra', 'ASC']],
     });
 
@@ -127,7 +136,14 @@ const confirmarPago = async (req, res, next) => {
 
     const [updatedNormales] = await CompraNormal.update(
       { estado: 'pagada' },
-      { where: { tarjeta_id, estado: 'pendiente' }, transaction: t }
+      {
+        where: {
+          tarjeta_id,
+          estado: 'pendiente',
+          fecha_compra: { [Op.between]: [fechaInicio, fechaFin] },
+        },
+        transaction: t,
+      }
     );
 
     const cuotas = await CuotaMensual.findAll({
