@@ -14,18 +14,45 @@ function monthRange(year, month) {
   };
 }
 
-// Calcula el año/mes donde caerá el próximo pago real de una tarjeta
-function nextPagoYearMonth(diaPago) {
-  const now = new Date();
-  const y   = now.getFullYear();
-  const m   = now.getMonth() + 1; // 1-indexed
-  const d   = now.getDate();
-  // Si el día de pago de este mes todavía no ha pasado, el próximo pago es este mes
-  if (d <= diaPago) return { pagoYear: y, pagoMonth: m };
-  // Si ya pasó, el próximo pago es el mes siguiente
-  return m + 1 > 12
-    ? { pagoYear: y + 1, pagoMonth: 1 }
-    : { pagoYear: y,     pagoMonth: m + 1 };
+function lastDayOfMonth(year, month) {
+  // month: 1..12
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function shiftYearMonth(year, month, deltaMonths) {
+  const base = new Date(Date.UTC(year, month - 1 + deltaMonths, 1));
+  return { year: base.getUTCFullYear(), month: base.getUTCMonth() + 1 };
+}
+
+function clampDay(year, month, day) {
+  return Math.min(day, lastDayOfMonth(year, month));
+}
+
+function dateOnlyUTC(year, month, day) {
+  return new Date(Date.UTC(year, month - 1, day)).toISOString().split('T')[0];
+}
+
+// Ciclo facturado asociado al "pago del mes (year, month)".
+// Ventana: [corte_anterior + 1 día, corte_actual]
+function billingCycleForPagoMonth(year, month, diaCorte, diaPago) {
+  // Si el día de pago es <= al día de corte, el ciclo se cierra con el corte del mes anterior.
+  // Ej: corte=15, pago=5 => pago de julio cierra en junio 15.
+  const corteActualYM = diaPago <= diaCorte ? shiftYearMonth(year, month, -1) : { year, month };
+
+  const corteActualDay = clampDay(corteActualYM.year, corteActualYM.month, diaCorte);
+  const corteActualDate = new Date(Date.UTC(corteActualYM.year, corteActualYM.month - 1, corteActualDay));
+
+  const corteAnteriorYM = shiftYearMonth(corteActualYM.year, corteActualYM.month, -1);
+  const corteAnteriorDay = clampDay(corteAnteriorYM.year, corteAnteriorYM.month, diaCorte);
+  const corteAnteriorDate = new Date(Date.UTC(corteAnteriorYM.year, corteAnteriorYM.month - 1, corteAnteriorDay));
+
+  const fechaInicioDate = new Date(corteAnteriorDate.getTime());
+  fechaInicioDate.setUTCDate(fechaInicioDate.getUTCDate() + 1);
+
+  return {
+    fechaInicio: fechaInicioDate.toISOString().split('T')[0],
+    fechaFin: dateOnlyUTC(corteActualYM.year, corteActualYM.month, corteActualDay),
+  };
 }
 
 // GET /api/calendario?year=YYYY&month=MM
@@ -48,13 +75,14 @@ const getCalendario = async (req, res, next) => {
       });
 
       const diaPago = Math.min(t.dia_pago, lastDay);
+      const ciclo = billingCycleForPagoMonth(year, month, t.dia_corte, t.dia_pago);
 
-      // Compras normales pendientes del mes (según fecha_compra)
+      // Compras normales pendientes del ciclo facturado asociado al pago de este mes.
       const pendingNormales = await CompraNormal.count({
         where: {
           tarjeta_id: t.id,
           estado: 'pendiente',
-          fecha_compra: { [Op.between]: [fechaInicio, fechaFin] },
+          fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
         },
       });
 
@@ -142,7 +170,15 @@ const confirmarPago = async (req, res, next) => {
       return res.status(400).json({ error: 'Faltan parámetros' });
     }
 
-    const { fechaInicio, fechaFin } = monthRange(parseInt(year), parseInt(month));
+    const yearInt = parseInt(year);
+    const monthInt = parseInt(month);
+    const { fechaInicio, fechaFin } = monthRange(yearInt, monthInt);
+    const tarjeta = await Tarjeta.findByPk(tarjeta_id, { transaction: t });
+    if (!tarjeta) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Tarjeta no encontrada' });
+    }
+    const ciclo = billingCycleForPagoMonth(yearInt, monthInt, tarjeta.dia_corte, tarjeta.dia_pago);
 
     const [updatedNormales] = await CompraNormal.update(
       { estado: 'pagada' },
@@ -150,7 +186,7 @@ const confirmarPago = async (req, res, next) => {
         where: {
           tarjeta_id,
           estado: 'pendiente',
-          fecha_compra: { [Op.between]: [fechaInicio, fechaFin] },
+          fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
         },
         transaction: t,
       }
