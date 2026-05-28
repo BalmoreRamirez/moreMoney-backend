@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { sequelize } = require('./models');
+const authMiddleware = require('./middleware/authMiddleware');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,10 +12,12 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-app.use('/api/tarjetas',   require('./routes/tarjetas'));
-app.use('/api/compras',    require('./routes/compras'));
-app.use('/api/calendario', require('./routes/calendario'));
-app.use('/api/reportes',   require('./routes/reportes'));
+app.use('/api/auth',       require('./routes/auth'));
+
+app.use('/api/tarjetas',   authMiddleware, require('./routes/tarjetas'));
+app.use('/api/compras',    authMiddleware, require('./routes/compras'));
+app.use('/api/calendario', authMiddleware, require('./routes/calendario'));
+app.use('/api/reportes',   authMiddleware, require('./routes/reportes'));
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {

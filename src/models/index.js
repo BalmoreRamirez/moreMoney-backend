@@ -26,6 +26,7 @@ const db = {};
 db.Sequelize = Sequelize;
 db.sequelize = sequelize;
 
+db.Usuario = require('./usuario')(sequelize, Sequelize.DataTypes);
 db.Tarjeta = require('./tarjeta')(sequelize, Sequelize.DataTypes);
 db.CompraNormal = require('./compraNormal')(sequelize, Sequelize.DataTypes);
 db.CompraTasaCero = require('./compraTasaCero')(sequelize, Sequelize.DataTypes);
