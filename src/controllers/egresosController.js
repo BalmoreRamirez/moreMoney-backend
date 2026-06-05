@@ -1,6 +1,6 @@
 'use strict';
 
-const { Transaccion, Cuenta } = require('../models');
+const { Transaccion, Cuenta, sequelize } = require('../models');
 
 const index = async (req, res, next) => {
   try {
@@ -18,6 +18,10 @@ const index = async (req, res, next) => {
 const store = async (req, res, next) => {
   try {
     const { cuenta_id, monto, descripcion, fecha } = req.body;
+    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+    if (parseFloat(monto) > saldo_actual) {
+      return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}` });
+    }
     const egreso = await Transaccion.create({
       cuenta_id:      parseInt(cuenta_id),
       tipo:           'egreso',
@@ -40,6 +44,10 @@ const update = async (req, res, next) => {
     });
     if (!egreso) return res.status(404).json({ error: 'Egreso no encontrado' });
     const { cuenta_id, monto, descripcion, fecha } = req.body;
+    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+    if (parseFloat(monto) > saldo_actual + parseFloat(egreso.monto)) {
+      return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${(saldo_actual + parseFloat(egreso.monto)).toFixed(2)}` });
+    }
     await egreso.update({
       cuenta_id: parseInt(cuenta_id),
       monto:     parseFloat(monto),

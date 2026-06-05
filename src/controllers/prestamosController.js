@@ -72,6 +72,12 @@ const store = async (req, res, next) => {
     const cuenta = await Cuenta.findByPk(cuenta_id);
     if (!cuenta) { await t.rollback(); return res.status(404).json({ error: 'Cuenta no encontrada' }); }
 
+    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+    if (parseFloat(capital) > saldo_actual) {
+      await t.rollback();
+      return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}` });
+    }
+
     const prestamo = await Prestamo.create(
       { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, cuenta_id, estado: 'activo' },
       { transaction: t },

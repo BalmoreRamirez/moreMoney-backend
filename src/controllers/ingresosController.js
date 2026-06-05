@@ -131,6 +131,12 @@ const storeInversion = async (req, res, next) => {
     const cuenta = await Cuenta.findByPk(cuenta_egreso_id);
     if (!cuenta) { await t.rollback(); return res.status(404).json({ error: 'Cuenta de egreso no encontrada' }); }
 
+    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_egreso_id), sequelize);
+    if (parseFloat(costo_total) > saldo_actual) {
+      await t.rollback();
+      return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}` });
+    }
+
     const inv = await Inversion.create(
       { nombre, costo_total, fecha_compra, cuenta_egreso_id, estado: 'en_curso' },
       { transaction: t }
