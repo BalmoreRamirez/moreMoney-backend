@@ -2,7 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../models');
-const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, sequelize } = db;
+const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, Cuenta, Transaccion, sequelize } = db;
 
 function monthRange(year, month) {
   const lastDay     = new Date(year, month, 0).getDate();
@@ -15,7 +15,6 @@ function monthRange(year, month) {
 }
 
 function lastDayOfMonth(year, month) {
-  // month: 1..12
   return new Date(Date.UTC(year, month, 0)).getUTCDate();
 }
 
@@ -32,18 +31,13 @@ function dateOnlyUTC(year, month, day) {
   return new Date(Date.UTC(year, month - 1, day)).toISOString().split('T')[0];
 }
 
-// Ciclo facturado asociado al "pago del mes (year, month)".
-// Ventana: [corte_anterior + 1 día, corte_actual]
 function billingCycleForPagoMonth(year, month, diaCorte, diaPago) {
-  // Si el día de pago es <= al día de corte, el ciclo se cierra con el corte del mes anterior.
-  // Ej: corte=15, pago=5 => pago de julio cierra en junio 15.
   const corteActualYM = diaPago <= diaCorte ? shiftYearMonth(year, month, -1) : { year, month };
 
-  const corteActualDay = clampDay(corteActualYM.year, corteActualYM.month, diaCorte);
-  const corteActualDate = new Date(Date.UTC(corteActualYM.year, corteActualYM.month - 1, corteActualDay));
+  const corteActualDay  = clampDay(corteActualYM.year, corteActualYM.month, diaCorte);
 
-  const corteAnteriorYM = shiftYearMonth(corteActualYM.year, corteActualYM.month, -1);
-  const corteAnteriorDay = clampDay(corteAnteriorYM.year, corteAnteriorYM.month, diaCorte);
+  const corteAnteriorYM   = shiftYearMonth(corteActualYM.year, corteActualYM.month, -1);
+  const corteAnteriorDay  = clampDay(corteAnteriorYM.year, corteAnteriorYM.month, diaCorte);
   const corteAnteriorDate = new Date(Date.UTC(corteAnteriorYM.year, corteAnteriorYM.month - 1, corteAnteriorDay));
 
   const fechaInicioDate = new Date(corteAnteriorDate.getTime());
@@ -51,7 +45,7 @@ function billingCycleForPagoMonth(year, month, diaCorte, diaPago) {
 
   return {
     fechaInicio: fechaInicioDate.toISOString().split('T')[0],
-    fechaFin: dateOnlyUTC(corteActualYM.year, corteActualYM.month, corteActualDay),
+    fechaFin:    dateOnlyUTC(corteActualYM.year, corteActualYM.month, corteActualDay),
   };
 }
 
@@ -75,9 +69,8 @@ const getCalendario = async (req, res, next) => {
       });
 
       const diaPago = Math.min(t.dia_pago, lastDay);
-      const ciclo = billingCycleForPagoMonth(year, month, t.dia_corte, t.dia_pago);
+      const ciclo   = billingCycleForPagoMonth(year, month, t.dia_corte, t.dia_pago);
 
-      // Compras normales pendientes del ciclo facturado asociado al pago de este mes.
       const pendingNormales = await CompraNormal.count({
         where: {
           tarjeta_id: t.id,
@@ -95,13 +88,13 @@ const getCalendario = async (req, res, next) => {
       });
 
       events.push({
-        type:              'pago',
-        day:               diaPago,
-        tarjeta_id:        t.id,
-        tarjeta_nombre:    t.nombre,
-        banco:             t.banco,
-        tiene_pendientes:  pendingNormales > 0 || cuotasEnMes > 0,
-        pendientes_count:  pendingNormales + cuotasEnMes,
+        type:             'pago',
+        day:              diaPago,
+        tarjeta_id:       t.id,
+        tarjeta_nombre:   t.nombre,
+        banco:            t.banco,
+        tiene_pendientes: pendingNormales > 0 || cuotasEnMes > 0,
+        pendientes_count: pendingNormales + cuotasEnMes,
       });
     }
 
@@ -118,13 +111,11 @@ const getDetallePago = async (req, res, next) => {
     const tarjeta = await Tarjeta.findByPk(tarjeta_id);
     if (!tarjeta) return res.status(404).json({ error: 'Tarjeta no encontrada' });
 
-    const yearInt = parseInt(year);
+    const yearInt  = parseInt(year);
     const monthInt = parseInt(month);
-
     const { fechaInicio, fechaFin } = monthRange(yearInt, monthInt);
     const ciclo = billingCycleForPagoMonth(yearInt, monthInt, tarjeta.dia_corte, tarjeta.dia_pago);
 
-    // Compras normales pendientes del ciclo facturado asociado al pago del mes.
     const compras_normales = await CompraNormal.findAll({
       where: {
         tarjeta_id,
@@ -149,8 +140,8 @@ const getDetallePago = async (req, res, next) => {
 
     res.json({
       tarjeta,
-      ciclo_inicio: ciclo.fechaInicio,
-      ciclo_fin:    ciclo.fechaFin,
+      ciclo_inicio:    ciclo.fechaInicio,
+      ciclo_fin:       ciclo.fechaFin,
       compras_normales,
       cuotas,
       total_normales,
@@ -160,19 +151,20 @@ const getDetallePago = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// POST /api/calendario/pago/confirmar
+// POST /api/calendario/pago/confirmar  { tarjeta_id, year, month, cuenta_id }
 const confirmarPago = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const { tarjeta_id, year, month } = req.body;
+    const { tarjeta_id, year, month, cuenta_id } = req.body;
     if (!tarjeta_id || !year || !month) {
       await t.rollback();
       return res.status(400).json({ error: 'Faltan parámetros' });
     }
 
-    const yearInt = parseInt(year);
+    const yearInt  = parseInt(year);
     const monthInt = parseInt(month);
     const { fechaInicio, fechaFin } = monthRange(yearInt, monthInt);
+
     const tarjeta = await Tarjeta.findByPk(tarjeta_id, { transaction: t });
     if (!tarjeta) {
       await t.rollback();
@@ -180,17 +172,15 @@ const confirmarPago = async (req, res, next) => {
     }
     const ciclo = billingCycleForPagoMonth(yearInt, monthInt, tarjeta.dia_corte, tarjeta.dia_pago);
 
-    const [updatedNormales] = await CompraNormal.update(
-      { estado: 'pagada' },
-      {
-        where: {
-          tarjeta_id,
-          estado: 'pendiente',
-          fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
-        },
-        transaction: t,
-      }
-    );
+    // Fetch pending records to compute total within the transaction
+    const compras_pendientes = await CompraNormal.findAll({
+      where: {
+        tarjeta_id,
+        estado: 'pendiente',
+        fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
+      },
+      transaction: t,
+    });
 
     const cuotas = await CuotaMensual.findAll({
       where: { estado: 'pendiente', fecha_estimada_pago: { [Op.between]: [fechaInicio, fechaFin] } },
@@ -201,6 +191,37 @@ const confirmarPago = async (req, res, next) => {
       transaction: t,
     });
 
+    const total_normales = compras_pendientes.reduce((s, c) => s + parseFloat(c.monto), 0);
+    const total_cuotas   = cuotas.reduce((s, c) => s + parseFloat(c.monto_cuota), 0);
+    const total          = parseFloat((total_normales + total_cuotas).toFixed(2));
+
+    // Validate cuenta when there is something to pay
+    if (total > 0 && !cuenta_id) {
+      await t.rollback();
+      return res.status(422).json({ error: 'Se debe seleccionar una cuenta desde donde realizar el pago.' });
+    }
+    if (cuenta_id) {
+      const cuenta = await Cuenta.findByPk(cuenta_id, { transaction: t });
+      if (!cuenta) {
+        await t.rollback();
+        return res.status(404).json({ error: 'Cuenta no encontrada' });
+      }
+    }
+
+    // Mark compras normales as paid
+    const [updatedNormales] = await CompraNormal.update(
+      { estado: 'pagada' },
+      {
+        where: {
+          tarjeta_id,
+          estado: 'pendiente',
+          fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
+        },
+        transaction: t,
+      },
+    );
+
+    // Mark cuotas as paid and close completed tasa-cero purchases
     for (const cuota of cuotas) {
       await cuota.update({ estado: 'pagada' }, { transaction: t });
 
@@ -211,9 +232,23 @@ const confirmarPago = async (req, res, next) => {
       if (restantes === 0) {
         await CompraTasaCero.update(
           { estado: 'finalizada' },
-          { where: { id: cuota.tasa_cero_id }, transaction: t }
+          { where: { id: cuota.tasa_cero_id }, transaction: t },
         );
       }
+    }
+
+    // Create egreso transaction in the selected account
+    if (total > 0 && cuenta_id) {
+      const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+      await Transaccion.create({
+        cuenta_id:       parseInt(cuenta_id),
+        tipo:            'egreso',
+        monto:           total,
+        descripcion:     `Pago tarjeta ${tarjeta.nombre} — ${MESES[monthInt - 1]} ${yearInt}`,
+        fecha:           new Date().toISOString().split('T')[0],
+        referencia_tipo: 'pago_tarjeta',
+        referencia_id:   parseInt(tarjeta_id),
+      }, { transaction: t });
     }
 
     await t.commit();
@@ -224,16 +259,17 @@ const confirmarPago = async (req, res, next) => {
          COALESCE((SELECT SUM(ctc.monto_total) FROM compras_tasa_cero ctc WHERE ctc.tarjeta_id = :id AND ctc.estado = 'activa'), 0) AS sum_tasa_cero,
          COALESCE((SELECT SUM(cm.monto_cuota) FROM cuotas_mensuales cm INNER JOIN compras_tasa_cero ctc ON cm.tasa_cero_id = ctc.id WHERE ctc.tarjeta_id = :id AND ctc.estado = 'activa' AND cm.estado = 'pagada'), 0) AS sum_cuotas_pagadas
        FROM tarjetas t WHERE t.id = :id`,
-      { replacements: { id: tarjeta_id } }
+      { replacements: { id: tarjeta_id } },
     );
 
     const limite  = parseFloat(row.limite_credito);
     const gastado = parseFloat(row.sum_normales) + parseFloat(row.sum_tasa_cero) - parseFloat(row.sum_cuotas_pagadas);
 
     res.json({
-      ok: true,
+      ok:               true,
       normales_pagadas: updatedNormales,
       cuotas_pagadas:   cuotas.length,
+      total_pagado:     total,
       saldos: {
         limite_credito:   limite,
         saldo_gastado:    Math.max(0, gastado),
