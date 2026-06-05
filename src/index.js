@@ -20,6 +20,7 @@ app.use('/api/calendario',   authMiddleware, require('./routes/calendario'));
 app.use('/api/reportes',     authMiddleware, require('./routes/reportes'));
 app.use('/api/cuentas',      authMiddleware, require('./routes/cuentas'));
 app.use('/api/ingresos',     authMiddleware, require('./routes/ingresos'));
+app.use('/api/egresos',      authMiddleware, require('./routes/egresos'));
 app.use('/api/prestamos',    authMiddleware, require('./routes/prestamos'));
 
 // eslint-disable-next-line no-unused-vars
