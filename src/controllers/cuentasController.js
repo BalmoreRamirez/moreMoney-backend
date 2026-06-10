@@ -148,4 +148,68 @@ const destroyTransaccion = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { index, store, update, destroy, transacciones, storeTransaccion, destroyTransaccion, dashboardStats };
+// POST /api/cuentas/transferir  { origen_id, destino_id, monto, descripcion?, fecha? }
+const transferir = async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const { origen_id, destino_id, monto, descripcion, fecha } = req.body;
+
+    if (!origen_id || !destino_id || !monto) {
+      await t.rollback();
+      return res.status(422).json({ error: 'Se requieren origen_id, destino_id y monto.' });
+    }
+    if (parseInt(origen_id) === parseInt(destino_id)) {
+      await t.rollback();
+      return res.status(422).json({ error: 'La cuenta de origen y destino deben ser diferentes.' });
+    }
+
+    const [origen, destino] = await Promise.all([
+      Cuenta.findByPk(origen_id),
+      Cuenta.findByPk(destino_id),
+    ]);
+    if (!origen)  { await t.rollback(); return res.status(404).json({ error: 'Cuenta de origen no encontrada.' }); }
+    if (!destino) { await t.rollback(); return res.status(404).json({ error: 'Cuenta de destino no encontrada.' }); }
+
+    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(origen_id), sequelize);
+    if (parseFloat(monto) > saldo_actual) {
+      await t.rollback();
+      return res.status(422).json({ error: `Saldo insuficiente en "${origen.nombre}". Disponible: $${saldo_actual.toFixed(2)}` });
+    }
+
+    const fechaTx  = fecha || new Date().toISOString().split('T')[0];
+    const desc     = descripcion || `Transferencia a ${destino.nombre}`;
+
+    const egreso = await Transaccion.create({
+      cuenta_id:       origen_id,
+      tipo:            'egreso',
+      monto,
+      descripcion:     desc,
+      fecha:           fechaTx,
+      referencia_tipo: 'transferencia',
+    }, { transaction: t });
+
+    await Transaccion.create({
+      cuenta_id:       destino_id,
+      tipo:            'ingreso',
+      monto,
+      descripcion:     `Transferencia desde ${origen.nombre}`,
+      fecha:           fechaTx,
+      referencia_tipo: 'transferencia',
+      referencia_id:   egreso.id,
+    }, { transaction: t });
+
+    await t.commit();
+
+    const [saldoOrigen, saldoDestino] = await Promise.all([
+      saldoCuenta(origen_id),
+      saldoCuenta(destino_id),
+    ]);
+
+    res.status(201).json({
+      origen:  { ...origen.toJSON(),  ...saldoOrigen },
+      destino: { ...destino.toJSON(), ...saldoDestino },
+    });
+  } catch (err) { await t.rollback(); next(err); }
+};
+
+module.exports = { index, store, update, destroy, transacciones, storeTransaccion, destroyTransaccion, dashboardStats, transferir };

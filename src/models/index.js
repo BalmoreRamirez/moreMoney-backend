@@ -36,8 +36,10 @@ db.Transaccion = require('./transaccion')(sequelize, Sequelize.DataTypes);
 db.Sueldo = require('./sueldo')(sequelize, Sequelize.DataTypes);
 db.CobroSueldo = require('./cobroSueldo')(sequelize, Sequelize.DataTypes);
 db.Inversion    = require('./inversion')(sequelize, Sequelize.DataTypes);
-db.Prestamo     = require('./prestamo')(sequelize, Sequelize.DataTypes);
-db.PagoPrestamo = require('./pagoPrestamo')(sequelize, Sequelize.DataTypes);
+db.Prestamo        = require('./prestamo')(sequelize, Sequelize.DataTypes);
+db.PagoPrestamo    = require('./pagoPrestamo')(sequelize, Sequelize.DataTypes);
+db.CreditoRecibido = require('./creditoRecibido')(sequelize, Sequelize.DataTypes);
+db.CuotaCredito    = require('./cuotaCredito')(sequelize, Sequelize.DataTypes);
 
 Object.values(db).forEach((model) => {
   if (model.associate) {

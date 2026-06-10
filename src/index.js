@@ -22,6 +22,7 @@ app.use('/api/cuentas',      authMiddleware, require('./routes/cuentas'));
 app.use('/api/ingresos',     authMiddleware, require('./routes/ingresos'));
 app.use('/api/egresos',      authMiddleware, require('./routes/egresos'));
 app.use('/api/prestamos',    authMiddleware, require('./routes/prestamos'));
+app.use('/api/creditos',     authMiddleware, require('./routes/creditos'));
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {

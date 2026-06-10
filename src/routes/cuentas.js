@@ -5,8 +5,9 @@ const ctrl = require('../controllers/cuentasController');
 
 const router = Router();
 
-router.get('/stats', ctrl.dashboardStats);
-router.get('/',    ctrl.index);
+router.get('/stats',       ctrl.dashboardStats);
+router.post('/transferir', ctrl.transferir);
+router.get('/',            ctrl.index);
 router.post('/',   ctrl.store);
 router.put('/:id', ctrl.update);
 router.delete('/:id', ctrl.destroy);
