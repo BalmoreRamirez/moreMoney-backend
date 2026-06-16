@@ -1,14 +1,16 @@
 'use strict';
 
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
+const express     = require('express');
+const cors        = require('cors');
+const compression = require('compression');
 const { sequelize } = require('./models');
 const authMiddleware = require('./middleware/authMiddleware');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 

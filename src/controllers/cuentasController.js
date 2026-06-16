@@ -37,23 +37,40 @@ const dashboardStats = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// Saldo dinámico de una cuenta
+// Saldo dinámico de una cuenta (usado en escrituras puntuales)
 async function saldoCuenta(cuentaId) {
   return Cuenta.calcularSaldo(cuentaId, sequelize);
+}
+
+// Saldos de todas las cuentas en una sola query
+async function saldosTodas() {
+  const [rows] = await sequelize.query(
+    `SELECT
+       c.id,
+       c.saldo_inicial,
+       COALESCE(SUM(CASE WHEN t.tipo = 'ingreso' THEN t.monto ELSE 0 END), 0) AS total_ingresos,
+       COALESCE(SUM(CASE WHEN t.tipo = 'egreso'  THEN t.monto ELSE 0 END), 0) AS total_egresos
+     FROM cuentas c
+     LEFT JOIN transacciones t ON t.cuenta_id = c.id
+     GROUP BY c.id, c.saldo_inicial`
+  );
+  return Object.fromEntries(rows.map(r => {
+    const saldo_inicial  = parseFloat(r.saldo_inicial);
+    const total_ingresos = parseFloat(r.total_ingresos);
+    const total_egresos  = parseFloat(r.total_egresos);
+    return [r.id, { saldo_inicial, total_ingresos, total_egresos, saldo_actual: saldo_inicial + total_ingresos - total_egresos }];
+  }));
 }
 
 // GET /api/cuentas
 const index = async (req, res, next) => {
   try {
-    const cuentas = await Cuenta.findAll({ order: [['created_at', 'ASC']] });
+    const [cuentas, saldos] = await Promise.all([
+      Cuenta.findAll({ order: [['created_at', 'ASC']] }),
+      saldosTodas(),
+    ]);
 
-    const data = await Promise.all(
-      cuentas.map(async (c) => ({
-        ...c.toJSON(),
-        ...(await saldoCuenta(c.id)),
-      }))
-    );
-
+    const data = cuentas.map(c => ({ ...c.toJSON(), ...(saldos[c.id] ?? { saldo_inicial: 0, total_ingresos: 0, total_egresos: 0, saldo_actual: 0 }) }));
     const saldo_total = data.reduce((s, c) => s + c.saldo_actual, 0);
     res.json({ data, saldo_total });
   } catch (err) { next(err); }

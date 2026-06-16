@@ -22,26 +22,27 @@ const getMensual = async (req, res, next) => {
 
     const tarjetas = await Tarjeta.findAll({ order: [['nombre', 'ASC']] });
 
-    const resumen = [];
-    for (const t of tarjetas) {
-      const normalesRows = await CompraNormal.findAll({
-        where: { tarjeta_id: t.id, estado: 'pendiente' },
-        attributes: ['monto'],
-      });
+    const resumen = await Promise.all(tarjetas.map(async (t) => {
+      const [normalesRows, cuotasRows] = await Promise.all([
+        CompraNormal.findAll({
+          where: { tarjeta_id: t.id, estado: 'pendiente' },
+          attributes: ['monto'],
+        }),
+        CuotaMensual.findAll({
+          where: { estado: 'pendiente', fecha_estimada_pago: { [Op.between]: [fechaInicio, fechaFin] } },
+          include: [{
+            model: CompraTasaCero, as: 'compra_tasa_cero',
+            where: { tarjeta_id: t.id, estado: 'activa' }, required: true,
+            attributes: ['id', 'nombre', 'total_cuotas'],
+          }],
+          attributes: ['monto_cuota', 'numero_cuota'],
+        }),
+      ]);
+
       const total_normales = normalesRows.reduce((s, c) => s + parseFloat(c.monto), 0);
+      const total_cuotas   = cuotasRows.reduce((s, c) => s + parseFloat(c.monto_cuota), 0);
 
-      const cuotasRows = await CuotaMensual.findAll({
-        where: { estado: 'pendiente', fecha_estimada_pago: { [Op.between]: [fechaInicio, fechaFin] } },
-        include: [{
-          model: CompraTasaCero, as: 'compra_tasa_cero',
-          where: { tarjeta_id: t.id, estado: 'activa' }, required: true,
-          attributes: ['id', 'nombre', 'total_cuotas'],
-        }],
-        attributes: ['monto_cuota', 'numero_cuota'],
-      });
-      const total_cuotas = cuotasRows.reduce((s, c) => s + parseFloat(c.monto_cuota), 0);
-
-      resumen.push({
+      return {
         tarjeta_id:      t.id,
         nombre:          t.nombre,
         banco:           t.banco,
@@ -56,8 +57,8 @@ const getMensual = async (req, res, next) => {
           total_cuotas:  c.compra_tasa_cero.total_cuotas,
           monto_cuota:   parseFloat(c.monto_cuota),
         })),
-      });
-    }
+      };
+    }));
 
     const grand_total = resumen.reduce((s, r) => s + r.total, 0);
 
