@@ -9,7 +9,7 @@ function calcularSaldo(prestamo, pagos) {
   const hoy   = new Date();
   const inicio = new Date(prestamo.fecha_inicio);
   const meses_transcurridos = Math.max(
-    0,
+    1,
     (hoy.getFullYear() - inicio.getFullYear()) * 12 + (hoy.getMonth() - inicio.getMonth()),
   );
 
@@ -97,6 +97,58 @@ const store = async (req, res, next) => {
 
     const result = await Prestamo.findByPk(prestamo.id, { include: includeBase() });
     res.status(201).json(mapPrestamo(result));
+  } catch (err) { await t.rollback(); next(err); }
+};
+
+// PUT /api/prestamos/:id  — solo si no tiene pagos
+const update = async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const prestamo = await Prestamo.findByPk(req.params.id, {
+      include: [{ model: PagoPrestamo, as: 'pagos' }],
+    });
+    if (!prestamo) { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
+
+    if (prestamo.pagos.length > 0) {
+      await t.rollback();
+      return res.status(422).json({ error: 'No se puede editar un préstamo con abonos registrados.' });
+    }
+
+    const { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, cuenta_id } = req.body;
+
+    // Verificar saldo: revertir el egreso original y chequear si alcanza el nuevo capital
+    const capitalAnterior = parseFloat(prestamo.capital);
+    const nuevoCapital    = parseFloat(capital);
+    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+    // saldo disponible = saldo_actual + lo que ya salió por este préstamo (si la cuenta es la misma)
+    const mismaCuenta   = parseInt(prestamo.cuenta_id) === parseInt(cuenta_id);
+    const saldoEfectivo = mismaCuenta ? saldo_actual + capitalAnterior : saldo_actual;
+
+    if (nuevoCapital > saldoEfectivo) {
+      await t.rollback();
+      return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldoEfectivo.toFixed(2)}` });
+    }
+
+    await prestamo.update(
+      { deudor_nombre, deudor_contacto: deudor_contacto || null, capital, tasa_interes_mensual, fecha_inicio, cuenta_id },
+      { transaction: t },
+    );
+
+    // Actualizar la transacción de egreso vinculada
+    await Transaccion.update(
+      {
+        cuenta_id,
+        monto:       nuevoCapital,
+        descripcion: `Préstamo a ${deudor_nombre}`,
+        fecha:       fecha_inicio,
+      },
+      { where: { referencia_tipo: 'prestamo', referencia_id: prestamo.id }, transaction: t },
+    );
+
+    await t.commit();
+
+    const result = await Prestamo.findByPk(prestamo.id, { include: includeBase() });
+    res.json(mapPrestamo(result));
   } catch (err) { await t.rollback(); next(err); }
 };
 
@@ -201,4 +253,4 @@ const marcarPagado = async (req, res, next) => {
   } catch (err) { await t.rollback(); next(err); }
 };
 
-module.exports = { index, show, store, destroy, registrarAbono, marcarPagado };
+module.exports = { index, show, store, update, destroy, registrarAbono, marcarPagado };
