@@ -1,7 +1,7 @@
 'use strict';
 
 const db = require('../models');
-const { Sueldo, CobroSueldo, Inversion, Cuenta, Transaccion, sequelize } = db;
+const { Sueldo, CobroSueldo, Inversion, CobroInversion, Cuenta, Transaccion, sequelize } = db;
 
 // ─── SUELDOS ────────────────────────────────────────────────────────────────
 
@@ -97,6 +97,24 @@ const cobrarSueldo = async (req, res, next) => {
 
 // ─── INVERSIONES ────────────────────────────────────────────────────────────
 
+function mapInversion(json) {
+  const costo         = parseFloat(json.costo_total);
+  const venta         = json.precio_venta_total != null ? parseFloat(json.precio_venta_total) : null;
+  const esperado      = json.precio_esperado    != null ? parseFloat(json.precio_esperado)    : null;
+  const cobros        = json.cobros || [];
+  const total_cobrado = parseFloat(cobros.reduce((s, c) => s + parseFloat(c.monto), 0).toFixed(2));
+  const saldo_por_cobrar = esperado != null
+    ? parseFloat((esperado - total_cobrado).toFixed(2))
+    : null;
+  return {
+    ...json,
+    total_cobrado,
+    saldo_por_cobrar,
+    ganancia:          venta    != null ? parseFloat((venta    - costo).toFixed(2)) : null,
+    ganancia_esperada: esperado != null ? parseFloat((esperado - costo).toFixed(2)) : null,
+  };
+}
+
 const indexInversiones = async (req, res, next) => {
   try {
     const { estado } = req.query;
@@ -106,25 +124,14 @@ const indexInversiones = async (req, res, next) => {
     const inversiones = await Inversion.findAll({
       where,
       include: [
-        { model: Cuenta, as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
-        { model: Cuenta, as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
+        { model: Cuenta,        as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
+        { model: Cuenta,        as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
+        { model: CobroInversion, as: 'cobros', order: [['fecha_cobro', 'ASC']] },
       ],
       order: [['fecha_compra', 'DESC']],
     });
 
-    const data = inversiones.map((inv) => {
-      const json     = inv.toJSON();
-      const costo    = parseFloat(json.costo_total);
-      const venta    = json.precio_venta_total != null ? parseFloat(json.precio_venta_total) : null;
-      const esperado = json.precio_esperado    != null ? parseFloat(json.precio_esperado)    : null;
-      return {
-        ...json,
-        ganancia:          venta    != null ? venta    - costo : null,
-        ganancia_esperada: esperado != null ? esperado - costo : null,
-      };
-    });
-
-    res.json({ data });
+    res.json({ data: inversiones.map((inv) => mapInversion(inv.toJSON())) });
   } catch (err) { next(err); }
 };
 
@@ -165,65 +172,76 @@ const storeInversion = async (req, res, next) => {
         { model: Cuenta, as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
       ],
     });
-    const json     = result.toJSON();
-    const esperado = json.precio_esperado != null ? parseFloat(json.precio_esperado) : null;
-    res.status(201).json({
-      ...json,
-      ganancia:          null,
-      ganancia_esperada: esperado != null ? esperado - parseFloat(json.costo_total) : null,
-    });
+    res.status(201).json(mapInversion({ ...result.toJSON(), cobros: [] }));
   } catch (err) { await t.rollback(); next(err); }
 };
 
-// POST /api/ingresos/inversiones/:id/vender  { precio_venta_total, fecha_venta, cuenta_ingreso_id }
-const venderInversion = async (req, res, next) => {
+// POST /api/ingresos/inversiones/:id/cobrar
+const registrarCobro = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const inv = await Inversion.findByPk(req.params.id);
-    if (!inv)                   { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
-    if (inv.estado === 'vendida'){ await t.rollback(); return res.status(422).json({ error: 'Esta inversión ya fue vendida.' }); }
+    const inv = await Inversion.findByPk(req.params.id, {
+      include: [{ model: CobroInversion, as: 'cobros' }],
+    });
+    if (!inv)                    { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
+    if (inv.estado === 'vendida'){ await t.rollback(); return res.status(422).json({ error: 'Esta inversión ya está completada.' }); }
 
-    const { precio_venta_total, fecha_venta, cuenta_ingreso_id } = req.body;
+    const { monto, cuenta_id, fecha_cobro, nota, es_pago_final } = req.body;
+    if (!monto || !cuenta_id || !fecha_cobro) {
+      await t.rollback();
+      return res.status(422).json({ error: 'Se requieren monto, cuenta y fecha.' });
+    }
 
-    const cuentaIngreso = await Cuenta.findByPk(cuenta_ingreso_id);
-    if (!cuentaIngreso) { await t.rollback(); return res.status(404).json({ error: 'Cuenta de ingreso no encontrada' }); }
-
-    const fechaVenta = fecha_venta || new Date().toISOString().split('T')[0];
-
-    await inv.update(
-      { precio_venta_total, fecha_venta: fechaVenta, cuenta_ingreso_id, estado: 'vendida' },
-      { transaction: t }
+    const cobro = await CobroInversion.create(
+      { inversion_id: inv.id, monto, cuenta_id, fecha_cobro, nota: nota || null },
+      { transaction: t },
     );
 
     await Transaccion.create({
-      cuenta_id:       cuenta_ingreso_id,
+      cuenta_id,
       tipo:            'ingreso',
-      monto:           precio_venta_total,
-      descripcion:     `Venta inversión: ${inv.nombre}`,
-      fecha:           fechaVenta,
-      referencia_tipo: 'inversion',
-      referencia_id:   inv.id,
+      monto,
+      descripcion:     `Cobro inversión: ${inv.nombre}`,
+      fecha:           fecha_cobro,
+      referencia_tipo: 'cobro_inversion',
+      referencia_id:   cobro.id,
     }, { transaction: t });
+
+    // Auto-completar
+    const cobrosAnteriores = inv.cobros || [];
+    const totalCobrado = cobrosAnteriores.reduce((s, c) => s + parseFloat(c.monto), 0) + parseFloat(monto);
+    const precioEsperado = inv.precio_esperado != null ? parseFloat(inv.precio_esperado) : null;
+    const completar = es_pago_final || (precioEsperado !== null && totalCobrado >= precioEsperado);
+
+    if (completar) {
+      await inv.update({
+        estado:             'vendida',
+        precio_venta_total: parseFloat(totalCobrado.toFixed(2)),
+        cuenta_ingreso_id:  cuenta_id,
+      }, { transaction: t });
+    }
 
     await t.commit();
 
     const result = await Inversion.findByPk(inv.id, {
       include: [
-        { model: Cuenta, as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
-        { model: Cuenta, as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
+        { model: Cuenta,        as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
+        { model: Cuenta,        as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
+        { model: CobroInversion, as: 'cobros', order: [['fecha_cobro', 'ASC']] },
       ],
     });
-    const json    = result.toJSON();
-    const ganancia = parseFloat(json.precio_venta_total) - parseFloat(json.costo_total);
-    res.json({ ...json, ganancia });
+    res.status(201).json(mapInversion(result.toJSON()));
   } catch (err) { await t.rollback(); next(err); }
 };
 
 const destroyInversion = async (req, res, next) => {
   try {
-    const inv = await Inversion.findByPk(req.params.id);
+    const inv = await Inversion.findByPk(req.params.id, {
+      include: [{ model: CobroInversion, as: 'cobros' }],
+    });
     if (!inv) return res.status(404).json({ error: 'Inversión no encontrada' });
     if (inv.estado === 'vendida') return res.status(422).json({ error: 'No se puede eliminar una inversión ya vendida.' });
+    if (inv.cobros?.length)       return res.status(422).json({ error: 'No se puede eliminar una inversión con cobros registrados.' });
     await inv.destroy();
     res.status(204).send();
   } catch (err) { next(err); }
@@ -231,5 +249,5 @@ const destroyInversion = async (req, res, next) => {
 
 module.exports = {
   indexSueldos, storeSueldo, updateSueldo, destroySueldo, cobrarSueldo,
-  indexInversiones, storeInversion, venderInversion, destroyInversion,
+  indexInversiones, storeInversion, registrarCobro, destroyInversion,
 };

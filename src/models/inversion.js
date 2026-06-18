@@ -7,6 +7,7 @@ module.exports = (sequelize, DataTypes) => {
     static associate(models) {
       Inversion.belongsTo(models.Cuenta, { foreignKey: 'cuenta_egreso_id',  as: 'cuenta_egreso' });
       Inversion.belongsTo(models.Cuenta, { foreignKey: 'cuenta_ingreso_id', as: 'cuenta_ingreso' });
+      Inversion.hasMany(models.CobroInversion, { foreignKey: 'inversion_id', as: 'cobros' });
     }
   }
 

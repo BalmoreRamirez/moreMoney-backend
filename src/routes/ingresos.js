@@ -15,7 +15,7 @@ router.post('/sueldos/:id/cobrar',  ctrl.cobrarSueldo);
 // Inversiones
 router.get('/inversiones',                 ctrl.indexInversiones);
 router.post('/inversiones',                ctrl.storeInversion);
-router.post('/inversiones/:id/vender',     ctrl.venderInversion);
+router.post('/inversiones/:id/cobrar',     ctrl.registrarCobro);
 router.delete('/inversiones/:id',          ctrl.destroyInversion);
 
 module.exports = router;
