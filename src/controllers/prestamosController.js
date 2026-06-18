@@ -208,6 +208,13 @@ const registrarAbono = async (req, res, next) => {
       referencia_id:   pago.id,
     }, { transaction: t });
 
+    // Auto-completar si el total de abonos cubre la deuda
+    const pagosSimulados = [...(prestamo.pagos || []), { monto: parseFloat(monto) }];
+    const { saldo_pendiente } = calcularSaldo(prestamo, pagosSimulados);
+    if (saldo_pendiente <= 0) {
+      await prestamo.update({ estado: 'pagado' }, { transaction: t });
+    }
+
     await t.commit();
 
     const result = await Prestamo.findByPk(prestamo.id, { include: includeBase() });
@@ -227,24 +234,8 @@ const marcarPagado = async (req, res, next) => {
     if (!prestamo)              { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
     if (prestamo.estado === 'pagado') { await t.rollback(); return res.status(422).json({ error: 'Este préstamo ya está marcado como pagado.' }); }
 
-    const pagos        = prestamo.pagos || [];
-    const capital      = parseFloat(prestamo.capital);
-    const total_pagado = parseFloat(pagos.reduce((s, p) => s + parseFloat(p.monto), 0).toFixed(2));
-    const ganancia     = parseFloat((total_pagado - capital).toFixed(2));
-
-    // Solo registrar ganancia si es positiva
-    if (ganancia > 0) {
-      await Transaccion.create({
-        cuenta_id:       prestamo.cuenta_id,
-        tipo:            'ingreso',
-        monto:           ganancia,
-        descripcion:     `Ganancia préstamo — ${prestamo.deudor_nombre}`,
-        fecha:           new Date().toISOString().split('T')[0],
-        referencia_tipo: 'ganancia_prestamo',
-        referencia_id:   prestamo.id,
-      }, { transaction: t });
-    }
-
+    // Los abonos ya registraron ingresos por el monto completo (capital + interés).
+    // Solo se actualiza el estado; no se crea ninguna transacción adicional.
     await prestamo.update({ estado: 'pagado' }, { transaction: t });
     await t.commit();
 
