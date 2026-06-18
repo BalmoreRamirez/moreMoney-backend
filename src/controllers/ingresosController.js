@@ -113,10 +113,15 @@ const indexInversiones = async (req, res, next) => {
     });
 
     const data = inversiones.map((inv) => {
-      const json    = inv.toJSON();
-      const costo   = parseFloat(json.costo_total);
-      const venta   = json.precio_venta_total != null ? parseFloat(json.precio_venta_total) : null;
-      return { ...json, ganancia: venta != null ? venta - costo : null };
+      const json     = inv.toJSON();
+      const costo    = parseFloat(json.costo_total);
+      const venta    = json.precio_venta_total != null ? parseFloat(json.precio_venta_total) : null;
+      const esperado = json.precio_esperado    != null ? parseFloat(json.precio_esperado)    : null;
+      return {
+        ...json,
+        ganancia:          venta    != null ? venta    - costo : null,
+        ganancia_esperada: esperado != null ? esperado - costo : null,
+      };
     });
 
     res.json({ data });
@@ -126,7 +131,7 @@ const indexInversiones = async (req, res, next) => {
 const storeInversion = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const { nombre, costo_total, fecha_compra, cuenta_egreso_id } = req.body;
+    const { nombre, costo_total, precio_esperado, fecha_compra, cuenta_egreso_id } = req.body;
 
     const cuenta = await Cuenta.findByPk(cuenta_egreso_id);
     if (!cuenta) { await t.rollback(); return res.status(404).json({ error: 'Cuenta de egreso no encontrada' }); }
@@ -138,7 +143,7 @@ const storeInversion = async (req, res, next) => {
     }
 
     const inv = await Inversion.create(
-      { nombre, costo_total, fecha_compra, cuenta_egreso_id, estado: 'en_curso' },
+      { nombre, costo_total, precio_esperado: precio_esperado || null, fecha_compra, cuenta_egreso_id, estado: 'en_curso' },
       { transaction: t }
     );
 
@@ -160,7 +165,13 @@ const storeInversion = async (req, res, next) => {
         { model: Cuenta, as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
       ],
     });
-    res.status(201).json({ ...result.toJSON(), ganancia: null });
+    const json     = result.toJSON();
+    const esperado = json.precio_esperado != null ? parseFloat(json.precio_esperado) : null;
+    res.status(201).json({
+      ...json,
+      ganancia:          null,
+      ganancia_esperada: esperado != null ? esperado - parseFloat(json.costo_total) : null,
+    });
   } catch (err) { await t.rollback(); next(err); }
 };
 

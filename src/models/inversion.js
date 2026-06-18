@@ -14,6 +14,7 @@ module.exports = (sequelize, DataTypes) => {
     id:                 { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     nombre:             { type: DataTypes.STRING, allowNull: false, validate: { notEmpty: true } },
     costo_total:        { type: DataTypes.DECIMAL(10, 2), allowNull: false, validate: { min: 0.01 } },
+    precio_esperado:    { type: DataTypes.DECIMAL(10, 2), allowNull: true },
     precio_venta_total: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
     fecha_compra:       { type: DataTypes.DATEONLY, allowNull: false },
     fecha_venta:        { type: DataTypes.DATEONLY, allowNull: true },
