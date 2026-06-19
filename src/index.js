@@ -14,6 +14,8 @@ app.use(compression());
 app.use(cors());
 app.use(express.json());
 
+app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+
 app.use('/api/auth',       require('./routes/auth'));
 
 app.use('/api/tarjetas',     authMiddleware, require('./routes/tarjetas'));
