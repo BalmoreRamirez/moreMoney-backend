@@ -1,7 +1,8 @@
 'use strict';
 
 const { Router } = require('express');
-const ctrl = require('../controllers/ingresosController');
+const ctrl       = require('../controllers/ingresosController');
+const ctrlManual = require('../controllers/ingresosManualController');
 
 const router = Router();
 
@@ -17,5 +18,11 @@ router.get('/inversiones',                 ctrl.indexInversiones);
 router.post('/inversiones',                ctrl.storeInversion);
 router.post('/inversiones/:id/cobrar',     ctrl.registrarCobro);
 router.delete('/inversiones/:id',          ctrl.destroyInversion);
+
+// Otros ingresos (manuales)
+router.get('/otros',        ctrlManual.index);
+router.post('/otros',       ctrlManual.store);
+router.put('/otros/:id',    ctrlManual.update);
+router.delete('/otros/:id', ctrlManual.destroy);
 
 module.exports = router;

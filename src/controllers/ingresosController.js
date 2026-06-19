@@ -126,7 +126,7 @@ const indexInversiones = async (req, res, next) => {
       include: [
         { model: Cuenta,        as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
         { model: Cuenta,        as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
-        { model: CobroInversion, as: 'cobros', order: [['fecha_cobro', 'ASC']] },
+        { model: CobroInversion, as: 'cobros', separate: true, order: [['fecha_cobro', 'ASC']] },
       ],
       order: [['fecha_compra', 'DESC']],
     });
@@ -227,7 +227,7 @@ const registrarCobro = async (req, res, next) => {
       include: [
         { model: Cuenta,        as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
         { model: Cuenta,        as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
-        { model: CobroInversion, as: 'cobros', order: [['fecha_cobro', 'ASC']] },
+        { model: CobroInversion, as: 'cobros', separate: true, order: [['fecha_cobro', 'ASC']] },
       ],
     });
     res.status(201).json(mapInversion(result.toJSON()));
