@@ -4,6 +4,62 @@ const { Op } = require('sequelize');
 const db = require('../models');
 const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, sequelize } = db;
 
+// GET /api/reportes/flujo-tarjetas?periodo=dia|semana|mes|anio
+const getFlujoTarjetas = async (req, res, next) => {
+  try {
+    const periodo = req.query.periodo || 'mes';
+
+    const MAP_COMPRAS = {
+      dia:    { where: `fecha_compra >= CURRENT_DATE - INTERVAL '29 days'`,                       group: `fecha_compra::text`,                                    order: `1` },
+      semana: { where: `fecha_compra >= CURRENT_DATE - INTERVAL '83 days'`,                       group: `TO_CHAR(DATE_TRUNC('week',fecha_compra),'IYYY-IW')`,    order: `1` },
+      mes:    { where: `fecha_compra >= DATE_TRUNC('month',CURRENT_DATE) - INTERVAL '11 months'`, group: `TO_CHAR(fecha_compra,'YYYY-MM')`,                        order: `1` },
+      anio:   { where: `fecha_compra >= DATE_TRUNC('year',CURRENT_DATE) - INTERVAL '4 years'`,    group: `EXTRACT(YEAR FROM fecha_compra)::int::text`,             order: `1` },
+    };
+    const MAP_CUOTAS = {
+      dia:    { where: `fecha_estimada_pago >= CURRENT_DATE - INTERVAL '29 days'`,                       group: `fecha_estimada_pago::text`,                                    order: `1` },
+      semana: { where: `fecha_estimada_pago >= CURRENT_DATE - INTERVAL '83 days'`,                       group: `TO_CHAR(DATE_TRUNC('week',fecha_estimada_pago),'IYYY-IW')`,    order: `1` },
+      mes:    { where: `fecha_estimada_pago >= DATE_TRUNC('month',CURRENT_DATE) - INTERVAL '11 months'`, group: `TO_CHAR(fecha_estimada_pago,'YYYY-MM')`,                        order: `1` },
+      anio:   { where: `fecha_estimada_pago >= DATE_TRUNC('year',CURRENT_DATE) - INTERVAL '4 years'`,    group: `EXTRACT(YEAR FROM fecha_estimada_pago)::int::text`,             order: `1` },
+    };
+
+    const cfgC = MAP_COMPRAS[periodo];
+    const cfgQ = MAP_CUOTAS[periodo];
+    if (!cfgC) return res.status(422).json({ error: 'Periodo inválido. Usa: dia, semana, mes, anio' });
+
+    const [serie] = await sequelize.query(`
+      SELECT label, SUM(egresos)::numeric AS egresos
+      FROM (
+        SELECT
+          ${cfgC.group} AS label,
+          COALESCE(SUM(monto::numeric), 0) AS egresos
+        FROM compras_normales
+        WHERE ${cfgC.where}
+        GROUP BY ${cfgC.group}
+
+        UNION ALL
+
+        SELECT
+          ${cfgQ.group} AS label,
+          COALESCE(SUM(monto_cuota::numeric), 0) AS egresos
+        FROM cuotas_mensuales
+        WHERE ${cfgQ.where}
+        GROUP BY ${cfgQ.group}
+      ) combined
+      GROUP BY label
+      ORDER BY label
+    `);
+
+    res.json({
+      periodo,
+      serie: serie.map(r => ({
+        label:    r.label,
+        ingresos: 0,
+        egresos:  parseFloat(r.egresos),
+      })),
+    });
+  } catch (err) { next(err); }
+};
+
 function monthRange(year, month) {
   const lastDay     = new Date(year, month, 0).getDate();
   const paddedMonth = String(month).padStart(2, '0');
@@ -120,4 +176,4 @@ const getFlujo = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getMensual, getFlujo };
+module.exports = { getMensual, getFlujo, getFlujoTarjetas };
