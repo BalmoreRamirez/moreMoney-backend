@@ -2,7 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../models');
-const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual } = db;
+const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, sequelize } = db;
 
 function monthRange(year, month) {
   const lastDay     = new Date(year, month, 0).getDate();
@@ -66,4 +66,58 @@ const getMensual = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getMensual };
+// GET /api/reportes/flujo?periodo=dia|semana|mes|anio
+const getFlujo = async (req, res, next) => {
+  try {
+    const periodo = req.query.periodo || 'mes';
+
+    const SQL_MAP = {
+      dia:    { where: `fecha >= CURRENT_DATE - INTERVAL '29 days'`,                          group: `fecha::text`,                               order: `fecha::text` },
+      semana: { where: `fecha >= CURRENT_DATE - INTERVAL '83 days'`,                          group: `TO_CHAR(DATE_TRUNC('week',fecha),'IYYY-IW')`, order: `TO_CHAR(DATE_TRUNC('week',fecha),'IYYY-IW')` },
+      mes:    { where: `fecha >= DATE_TRUNC('month',CURRENT_DATE) - INTERVAL '11 months'`,    group: `TO_CHAR(fecha,'YYYY-MM')`,                   order: `TO_CHAR(fecha,'YYYY-MM')` },
+      anio:   { where: `fecha >= DATE_TRUNC('year',CURRENT_DATE) - INTERVAL '4 years'`,       group: `EXTRACT(YEAR FROM fecha)::int::text`,         order: `EXTRACT(YEAR FROM fecha)` },
+    };
+
+    const cfg = SQL_MAP[periodo];
+    if (!cfg) return res.status(422).json({ error: 'Periodo inválido. Usa: dia, semana, mes, anio' });
+
+    const [serie] = await sequelize.query(`
+      SELECT
+        ${cfg.group} AS label,
+        COALESCE(SUM(CASE WHEN tipo='ingreso' THEN monto::numeric ELSE 0 END),0) AS ingresos,
+        COALESCE(SUM(CASE WHEN tipo='egreso'  THEN monto::numeric ELSE 0 END),0) AS egresos
+      FROM transacciones
+      WHERE ${cfg.where}
+      GROUP BY ${cfg.group}
+      ORDER BY ${cfg.order}
+    `);
+
+    const [categorias] = await sequelize.query(`
+      SELECT
+        COALESCE(referencia_tipo,'otro') AS categoria,
+        COALESCE(SUM(CASE WHEN tipo='ingreso' THEN monto::numeric ELSE 0 END),0) AS ingresos,
+        COALESCE(SUM(CASE WHEN tipo='egreso'  THEN monto::numeric ELSE 0 END),0) AS egresos
+      FROM transacciones
+      WHERE ${cfg.where}
+      GROUP BY referencia_tipo
+      ORDER BY (COALESCE(SUM(CASE WHEN tipo='egreso'  THEN monto::numeric ELSE 0 END),0)
+              + COALESCE(SUM(CASE WHEN tipo='ingreso' THEN monto::numeric ELSE 0 END),0)) DESC
+    `);
+
+    res.json({
+      periodo,
+      serie: serie.map(r => ({
+        label:    r.label,
+        ingresos: parseFloat(r.ingresos),
+        egresos:  parseFloat(r.egresos),
+      })),
+      categorias: categorias.map(r => ({
+        categoria: r.categoria,
+        ingresos:  parseFloat(r.ingresos),
+        egresos:   parseFloat(r.egresos),
+      })),
+    });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getMensual, getFlujo };
