@@ -78,6 +78,7 @@ const cobrarSueldo = async (req, res, next) => {
       fecha:           fecha,
       referencia_tipo: 'sueldo',
       referencia_id:   sueldo.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     await t.commit();
@@ -162,6 +163,7 @@ const storeInversion = async (req, res, next) => {
       fecha:           fecha_compra,
       referencia_tipo: 'inversion',
       referencia_id:   inv.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     await t.commit();
@@ -205,6 +207,7 @@ const registrarCobro = async (req, res, next) => {
       fecha:           fecha_cobro,
       referencia_tipo: 'cobro_inversion',
       referencia_id:   cobro.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     // Auto-completar

@@ -9,6 +9,10 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: 'cuenta_id',
         as: 'cuenta',
       });
+      Transaccion.belongsTo(models.Usuario, {
+        foreignKey: 'usuario_id',
+        as: 'usuario',
+      });
     }
   }
 
@@ -46,6 +50,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
       referencia_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      usuario_id: {
         type: DataTypes.INTEGER,
         allowNull: true,
       },

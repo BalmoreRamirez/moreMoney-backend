@@ -13,12 +13,16 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: 'tarjeta_id',
         as: 'compras_tasa_cero',
       });
+      Tarjeta.belongsTo(models.Cuenta, {
+        foreignKey: 'cuenta_pago_id',
+        as: 'cuenta_pago',
+      });
     }
 
     // Fórmula de saldo dinámico según reglas del negocio
     static async calcularSaldos(tarjetaId, models) {
       const { CompraNormal, CompraTasaCero, CuotaMensual } = models;
-      const { Op, fn, col, literal } = sequelize.Sequelize;
+      const { Op, fn, col, literal } = require('sequelize');
 
       const [sumaNormales] = await CompraNormal.findAll({
         attributes: [[fn('COALESCE', fn('SUM', col('monto')), literal('0')), 'total']],
@@ -95,6 +99,10 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         validate: { min: 1, max: 31 },
+      },
+      cuenta_pago_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
       },
     },
     {

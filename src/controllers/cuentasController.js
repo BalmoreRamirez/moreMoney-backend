@@ -92,6 +92,17 @@ const update = async (req, res, next) => {
     if (!cuenta) return res.status(404).json({ error: 'Cuenta no encontrada' });
 
     const { nombre, tipo, saldo_inicial } = req.body;
+
+    // A1: saldo_inicial es inmutable una vez que existen transacciones
+    if (saldo_inicial !== undefined && parseFloat(saldo_inicial) !== parseFloat(cuenta.saldo_inicial)) {
+      const txCount = await Transaccion.count({ where: { cuenta_id: cuenta.id } });
+      if (txCount > 0) {
+        return res.status(422).json({
+          error: `No se puede modificar el saldo inicial de "${cuenta.nombre}": tiene ${txCount} transacción(es) registrada(s). El saldo inicial solo se puede cambiar antes del primer movimiento.`,
+        });
+      }
+    }
+
     await cuenta.update({ nombre, tipo, saldo_inicial });
     res.json({ ...cuenta.toJSON(), ...(await saldoCuenta(cuenta.id)) });
   } catch (err) { next(err); }
@@ -141,12 +152,13 @@ const storeTransaccion = async (req, res, next) => {
 
     const { tipo, monto, descripcion, fecha } = req.body;
     const tx = await Transaccion.create({
-      cuenta_id: cuenta.id,
+      cuenta_id:       cuenta.id,
       tipo,
       monto,
       descripcion,
-      fecha: fecha || new Date().toISOString().split('T')[0],
+      fecha:           fecha || new Date().toISOString().split('T')[0],
       referencia_tipo: 'manual',
+      usuario_id:      req.usuario?.id || null,
     });
     res.status(201).json(tx);
   } catch (err) { next(err); }
@@ -203,6 +215,7 @@ const transferir = async (req, res, next) => {
       descripcion:     desc,
       fecha:           fechaTx,
       referencia_tipo: 'transferencia',
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     await Transaccion.create({
@@ -213,6 +226,7 @@ const transferir = async (req, res, next) => {
       fecha:           fechaTx,
       referencia_tipo: 'transferencia',
       referencia_id:   egreso.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     await t.commit();

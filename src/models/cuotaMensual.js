@@ -42,6 +42,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 'pendiente',
       },
+      fecha_pago: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
+      },
     },
     {
       sequelize,

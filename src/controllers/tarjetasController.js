@@ -2,7 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../models');
-const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, sequelize } = db;
+const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, Cuenta, sequelize } = db;
 
 async function calcularSaldos(tarjetaId) {
   const [[row]] = await sequelize.query(
@@ -42,6 +42,7 @@ const index = async (req, res, next) => {
 
     const { count, rows } = await Tarjeta.findAndCountAll({
       limit, offset, order: [['created_at', 'DESC']],
+      include: [{ model: Cuenta, as: 'cuenta_pago', attributes: ['id', 'nombre', 'tipo'], required: false }],
     });
 
     const data = await Promise.all(rows.map(async (t) => ({
@@ -55,15 +56,20 @@ const index = async (req, res, next) => {
 
 const store = async (req, res, next) => {
   try {
-    const { nombre, banco, limite_credito, dia_corte, dia_pago } = req.body;
-    const tarjeta = await Tarjeta.create({ nombre, banco, limite_credito, dia_corte, dia_pago });
+    const { nombre, banco, limite_credito, dia_corte, dia_pago, cuenta_pago_id } = req.body;
+    const tarjeta = await Tarjeta.create({
+      nombre, banco, limite_credito, dia_corte, dia_pago,
+      cuenta_pago_id: cuenta_pago_id ? parseInt(cuenta_pago_id) : null,
+    });
     res.status(201).json(tarjeta);
   } catch (err) { next(err); }
 };
 
 const show = async (req, res, next) => {
   try {
-    const tarjeta = await Tarjeta.findByPk(req.params.id);
+    const tarjeta = await Tarjeta.findByPk(req.params.id, {
+      include: [{ model: Cuenta, as: 'cuenta_pago', attributes: ['id', 'nombre', 'tipo'], required: false }],
+    });
     if (!tarjeta) return res.status(404).json({ error: 'Tarjeta no encontrada' });
 
     const saldos = await calcularSaldos(tarjeta.id);
@@ -88,8 +94,13 @@ const update = async (req, res, next) => {
     const tarjeta = await Tarjeta.findByPk(req.params.id);
     if (!tarjeta) return res.status(404).json({ error: 'Tarjeta no encontrada' });
 
-    const { nombre, banco, limite_credito, dia_corte, dia_pago } = req.body;
-    await tarjeta.update({ nombre, banco, limite_credito, dia_corte, dia_pago });
+    const { nombre, banco, limite_credito, dia_corte, dia_pago, cuenta_pago_id } = req.body;
+    await tarjeta.update({
+      nombre, banco, limite_credito, dia_corte, dia_pago,
+      cuenta_pago_id: cuenta_pago_id !== undefined
+        ? (cuenta_pago_id ? parseInt(cuenta_pago_id) : null)
+        : tarjeta.cuenta_pago_id,
+    });
     res.json(tarjeta);
   } catch (err) { next(err); }
 };

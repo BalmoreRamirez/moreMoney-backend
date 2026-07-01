@@ -93,6 +93,7 @@ const getCalendario = async (req, res, next) => {
         tarjeta_id:       t.id,
         tarjeta_nombre:   t.nombre,
         banco:            t.banco,
+        cuenta_pago_id:   t.cuenta_pago_id ?? null,
         tiene_pendientes: pendingNormales > 0 || cuotasEnMes > 0,
         pendientes_count: pendingNormales + cuotasEnMes,
       });
@@ -151,11 +152,11 @@ const getDetallePago = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// POST /api/calendario/pago/confirmar  { tarjeta_id, year, month, cuenta_id }
+// POST /api/calendario/pago/confirmar  { tarjeta_id, year, month, cuenta_id? }
 const confirmarPago = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const { tarjeta_id, year, month, cuenta_id } = req.body;
+    const { tarjeta_id, year, month } = req.body;
     if (!tarjeta_id || !year || !month) {
       await t.rollback();
       return res.status(400).json({ error: 'Faltan parámetros' });
@@ -170,6 +171,10 @@ const confirmarPago = async (req, res, next) => {
       await t.rollback();
       return res.status(404).json({ error: 'Tarjeta no encontrada' });
     }
+
+    // Use explicitly provided cuenta_id, or fall back to the card's default payment account
+    const cuenta_id = req.body.cuenta_id || tarjeta.cuenta_pago_id || null;
+
     const ciclo = billingCycleForPagoMonth(yearInt, monthInt, tarjeta.dia_corte, tarjeta.dia_pago);
 
     // Fetch pending records to compute total within the transaction
@@ -208,6 +213,33 @@ const confirmarPago = async (req, res, next) => {
       }
     }
 
+    // C5 — Idempotencia: verificar que no exista ya un pago para este ciclo
+    if (total > 0) {
+      const pagoExistente = await Transaccion.findOne({
+        where: {
+          referencia_tipo: 'pago_tarjeta',
+          referencia_id:   parseInt(tarjeta_id),
+          fecha: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
+        },
+        transaction: t,
+      });
+      if (pagoExistente) {
+        await t.rollback();
+        return res.status(409).json({ error: 'Este pago ya fue procesado para el ciclo actual.' });
+      }
+    }
+
+    // C1 — Validar saldo disponible antes de debitar
+    if (total > 0 && cuenta_id) {
+      const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+      if (total > saldo_actual) {
+        await t.rollback();
+        return res.status(422).json({
+          error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}, requerido: $${total.toFixed(2)}`,
+        });
+      }
+    }
+
     // Mark compras normales as paid
     const [updatedNormales] = await CompraNormal.update(
       { estado: 'pagada' },
@@ -223,7 +255,10 @@ const confirmarPago = async (req, res, next) => {
 
     // Mark cuotas as paid and close completed tasa-cero purchases
     for (const cuota of cuotas) {
-      await cuota.update({ estado: 'pagada' }, { transaction: t });
+      await cuota.update(
+        { estado: 'pagada', fecha_pago: new Date().toISOString().split('T')[0] },
+        { transaction: t }
+      );
 
       const restantes = await CuotaMensual.count({
         where: { tasa_cero_id: cuota.tasa_cero_id, estado: 'pendiente' },
@@ -248,6 +283,7 @@ const confirmarPago = async (req, res, next) => {
         fecha:           new Date().toISOString().split('T')[0],
         referencia_tipo: 'pago_tarjeta',
         referencia_id:   parseInt(tarjeta_id),
+        usuario_id:      req.usuario?.id || null,
       }, { transaction: t });
     }
 

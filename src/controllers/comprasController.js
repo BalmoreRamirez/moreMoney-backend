@@ -95,11 +95,13 @@ const storeTasaCero = async (req, res, next) => {
 
     await CuotaMensual.bulkCreate(
       fechas.map((fecha, i) => ({
-        tasa_cero_id:       compra.id,
-        numero_cuota:       i + 1,
-        monto_cuota:        montoCuota,
+        tasa_cero_id:        compra.id,
+        numero_cuota:        i + 1,
+        monto_cuota:         i === n - 1
+          ? parseFloat((parseFloat(monto_total) - montoCuota * (n - 1)).toFixed(2))
+          : montoCuota,
         fecha_estimada_pago: fecha,
-        estado:             'pendiente',
+        estado:              'pendiente',
       })),
       { transaction: t }
     );
@@ -160,7 +162,9 @@ const updateTasaCero = async (req, res, next) => {
         fechas.map((fecha, i) => ({
           tasa_cero_id:        compra.id,
           numero_cuota:        i + 1,
-          monto_cuota:         montoCuota,
+          monto_cuota:         i === newTotalCuotas - 1
+            ? parseFloat((newMontoTotal - montoCuota * (newTotalCuotas - 1)).toFixed(2))
+            : montoCuota,
           fecha_estimada_pago: fecha,
           estado:              'pendiente',
         })),

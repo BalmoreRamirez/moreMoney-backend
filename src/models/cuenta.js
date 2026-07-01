@@ -9,6 +9,10 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: 'cuenta_id',
         as: 'transacciones',
       });
+      Cuenta.hasMany(models.Tarjeta, {
+        foreignKey: 'cuenta_pago_id',
+        as: 'tarjetas_pago',
+      });
     }
 
     static async calcularSaldo(cuentaId, sequelizeInstance) {
@@ -67,12 +71,18 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   Cuenta.addHook('beforeDestroy', async (cuenta) => {
-    const count = await sequelize.models.Transaccion.count({
-      where: { cuenta_id: cuenta.id },
-    });
-    if (count > 0) {
+    const [txCount, cobroCount] = await Promise.all([
+      sequelize.models.Transaccion.count({ where: { cuenta_id: cuenta.id } }),
+      sequelize.models.CobroInversion.count({ where: { cuenta_id: cuenta.id } }),
+    ]);
+    if (txCount > 0) {
       throw new Error(
-        `No se puede eliminar la cuenta "${cuenta.nombre}": tiene ${count} transacción(es) registrada(s).`
+        `No se puede eliminar la cuenta "${cuenta.nombre}": tiene ${txCount} transacción(es) registrada(s).`
+      );
+    }
+    if (cobroCount > 0) {
+      throw new Error(
+        `No se puede eliminar la cuenta "${cuenta.nombre}": tiene ${cobroCount} cobro(s) de inversión registrado(s).`
       );
     }
   });
