@@ -12,7 +12,7 @@ function calcularSaldo(prestamo, pagos) {
   let meses = (hoy.getFullYear() - inicio.getFullYear()) * 12 + (hoy.getMonth() - inicio.getMonth());
   // Si aún no llegó el día del aniversario mensual, no se cumplió ese mes
   if (hoy.getDate() < inicio.getDate()) meses--;
-  const meses_transcurridos = Math.max(0, meses);
+  const meses_transcurridos = Math.max(1, meses);
 
   const capital             = parseFloat(prestamo.capital);
   const tasa                = parseFloat(prestamo.tasa_interes_mensual);
