@@ -6,12 +6,13 @@ const { Prestamo, PagoPrestamo, Cuenta, Transaccion, sequelize } = db;
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function calcularSaldo(prestamo, pagos) {
-  const hoy   = new Date();
-  const inicio = new Date(prestamo.fecha_inicio);
-  const meses_transcurridos = Math.max(
-    1,
-    (hoy.getFullYear() - inicio.getFullYear()) * 12 + (hoy.getMonth() - inicio.getMonth()),
-  );
+  const hoy    = new Date();
+  const inicio = new Date(prestamo.fecha_inicio + 'T00:00:00');
+
+  let meses = (hoy.getFullYear() - inicio.getFullYear()) * 12 + (hoy.getMonth() - inicio.getMonth());
+  // Si aún no llegó el día del aniversario mensual, no se cumplió ese mes
+  if (hoy.getDate() < inicio.getDate()) meses--;
+  const meses_transcurridos = Math.max(0, meses);
 
   const capital             = parseFloat(prestamo.capital);
   const tasa                = parseFloat(prestamo.tasa_interes_mensual);
