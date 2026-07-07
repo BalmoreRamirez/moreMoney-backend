@@ -40,7 +40,7 @@ module.exports = {
             referencia_tipo IS NULL OR referencia_tipo IN (
               'manual', 'sueldo', 'pago_tarjeta', 'transferencia',
               'inversion', 'cobro_inversion', 'reversion',
-              'credito_recibido', 'cuota_credito', 'prestamo'
+              'credito_recibido', 'cuota_credito', 'prestamo', 'pago_prestamo'
             )
           )
       `);
