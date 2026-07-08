@@ -71,21 +71,27 @@ const getCalendario = async (req, res, next) => {
       const diaPago = Math.min(t.dia_pago, lastDay);
       const ciclo   = billingCycleForPagoMonth(year, month, t.dia_corte, t.dia_pago);
 
-      const pendingNormales = await CompraNormal.count({
+      const normalesPendientes = await CompraNormal.findAll({
         where: {
           tarjeta_id: t.id,
           estado: 'pendiente',
           fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
         },
+        attributes: ['monto'],
       });
+      const pendingNormales = normalesPendientes.length;
+      const montoNormales   = normalesPendientes.reduce((s, c) => s + parseFloat(c.monto), 0);
 
-      const cuotasEnMes = await CuotaMensual.count({
+      const cuotasPendientes = await CuotaMensual.findAll({
         where: { estado: 'pendiente', fecha_estimada_pago: { [Op.between]: [fechaInicio, fechaFin] } },
         include: [{
           model: CompraTasaCero, as: 'compra_tasa_cero',
           where: { tarjeta_id: t.id, estado: 'activa' }, required: true,
         }],
+        attributes: ['monto_cuota'],
       });
+      const cuotasEnMes = cuotasPendientes.length;
+      const montoCuotas = cuotasPendientes.reduce((s, c) => s + parseFloat(c.monto_cuota), 0);
 
       events.push({
         type:             'pago',
@@ -96,6 +102,7 @@ const getCalendario = async (req, res, next) => {
         cuenta_pago_id:   t.cuenta_pago_id ?? null,
         tiene_pendientes: pendingNormales > 0 || cuotasEnMes > 0,
         pendientes_count: pendingNormales + cuotasEnMes,
+        monto_total:      parseFloat((montoNormales + montoCuotas).toFixed(2)),
       });
     }
 
