@@ -223,6 +223,75 @@ const registrarAbono = async (req, res, next) => {
   } catch (err) { await t.rollback(); next(err); }
 };
 
+// PUT /api/prestamos/:id/abono/:abonoId  { monto, fecha_pago, nota? }
+const updateAbono = async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const pago = await PagoPrestamo.findOne({
+      where: { id: req.params.abonoId, prestamo_id: req.params.id },
+    });
+    if (!pago) { await t.rollback(); return res.status(404).json({ error: 'Abono no encontrado' }); }
+
+    const { monto, fecha_pago, nota } = req.body;
+    if (!monto || !fecha_pago) { await t.rollback(); return res.status(422).json({ error: 'Se requieren monto y fecha de pago.' }); }
+
+    await pago.update({ monto: parseFloat(monto), fecha_pago, nota: nota ?? pago.nota }, { transaction: t });
+
+    await Transaccion.update(
+      { monto: parseFloat(monto), fecha: fecha_pago },
+      { where: { referencia_tipo: 'pago_prestamo', referencia_id: pago.id }, transaction: t },
+    );
+
+    // Re-evaluar si el préstamo debe pasar a pagado o volver a activo
+    const prestamo = await Prestamo.findByPk(req.params.id, {
+      include: [{ model: PagoPrestamo, as: 'pagos' }],
+      transaction: t,
+    });
+    const { saldo_pendiente } = calcularSaldo(prestamo, prestamo.pagos);
+    const nuevoEstado = saldo_pendiente <= 0 ? 'pagado' : 'activo';
+    if (prestamo.estado !== nuevoEstado) {
+      await prestamo.update({ estado: nuevoEstado }, { transaction: t });
+    }
+
+    await t.commit();
+
+    const result = await Prestamo.findByPk(req.params.id, { include: includeBase() });
+    res.json(mapPrestamo(result));
+  } catch (err) { await t.rollback(); next(err); }
+};
+
+// DELETE /api/prestamos/:id/abono/:abonoId
+const destroyAbono = async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const pago = await PagoPrestamo.findOne({
+      where: { id: req.params.abonoId, prestamo_id: req.params.id },
+    });
+    if (!pago) { await t.rollback(); return res.status(404).json({ error: 'Abono no encontrado' }); }
+
+    await Transaccion.destroy({
+      where: { referencia_tipo: 'pago_prestamo', referencia_id: pago.id },
+      transaction: t,
+    });
+    await pago.destroy({ transaction: t });
+
+    // Si el préstamo estaba pagado y se borra un abono, vuelve a activo
+    const prestamo = await Prestamo.findByPk(req.params.id, {
+      include: [{ model: PagoPrestamo, as: 'pagos' }],
+      transaction: t,
+    });
+    const { saldo_pendiente } = calcularSaldo(prestamo, prestamo.pagos);
+    if (saldo_pendiente > 0 && prestamo.estado === 'pagado') {
+      await prestamo.update({ estado: 'activo' }, { transaction: t });
+    }
+
+    await t.commit();
+
+    const result = await Prestamo.findByPk(req.params.id, { include: includeBase() });
+    res.json(mapPrestamo(result));
+  } catch (err) { await t.rollback(); next(err); }
+};
+
 // ─── MARCAR COMO PAGADO ──────────────────────────────────────────────────────
 
 // POST /api/prestamos/:id/pagar
@@ -245,4 +314,4 @@ const marcarPagado = async (req, res, next) => {
   } catch (err) { await t.rollback(); next(err); }
 };
 
-module.exports = { index, show, store, update, destroy, registrarAbono, marcarPagado };
+module.exports = { index, show, store, update, destroy, registrarAbono, updateAbono, destroyAbono, marcarPagado };
