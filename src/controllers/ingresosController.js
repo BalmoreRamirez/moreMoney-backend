@@ -255,11 +255,26 @@ const updateInversion = async (req, res, next) => {
 };
 
 const resetearInversion = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const inv = await Inversion.findByPk(req.params.id);
-    if (!inv) return res.status(404).json({ error: 'Inversión no encontrada' });
-    if (inv.estado !== 'vendida') return res.status(422).json({ error: 'La inversión no está en estado vendida.' });
-    await inv.update({ estado: 'en_curso', precio_venta_total: null, cuenta_ingreso_id: null, fecha_venta: null });
+    const inv = await Inversion.findByPk(req.params.id, {
+      include: [{ model: CobroInversion, as: 'cobros' }],
+    });
+    if (!inv) { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
+    if (inv.estado !== 'vendida') { await t.rollback(); return res.status(422).json({ error: 'La inversión no está en estado vendida.' }); }
+
+    const cobroIds = (inv.cobros || []).map(c => c.id);
+    if (cobroIds.length) {
+      await Transaccion.destroy({ where: { referencia_tipo: 'cobro_inversion', referencia_id: cobroIds }, transaction: t });
+      await CobroInversion.destroy({ where: { id: cobroIds }, transaction: t });
+    }
+
+    await inv.update(
+      { estado: 'en_curso', precio_venta_total: null, cuenta_ingreso_id: null, fecha_venta: null },
+      { transaction: t },
+    );
+    await t.commit();
+
     const result = await Inversion.findByPk(inv.id, {
       include: [
         { model: Cuenta,         as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
@@ -268,7 +283,7 @@ const resetearInversion = async (req, res, next) => {
       ],
     });
     res.json(mapInversion(result.toJSON()));
-  } catch (err) { next(err); }
+  } catch (err) { await t.rollback(); next(err); }
 };
 
 const destroyInversion = async (req, res, next) => {
