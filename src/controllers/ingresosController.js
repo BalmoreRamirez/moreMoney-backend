@@ -237,6 +237,40 @@ const registrarCobro = async (req, res, next) => {
   } catch (err) { await t.rollback(); next(err); }
 };
 
+const updateInversion = async (req, res, next) => {
+  try {
+    const inv = await Inversion.findByPk(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Inversión no encontrada' });
+    const { nombre, precio_esperado, fecha_compra } = req.body;
+    await inv.update({ nombre, precio_esperado: precio_esperado || null, fecha_compra });
+    const result = await Inversion.findByPk(inv.id, {
+      include: [
+        { model: Cuenta,         as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
+        { model: Cuenta,         as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
+        { model: CobroInversion, as: 'cobros', separate: true, order: [['fecha_cobro', 'ASC']] },
+      ],
+    });
+    res.json(mapInversion(result.toJSON()));
+  } catch (err) { next(err); }
+};
+
+const resetearInversion = async (req, res, next) => {
+  try {
+    const inv = await Inversion.findByPk(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Inversión no encontrada' });
+    if (inv.estado !== 'vendida') return res.status(422).json({ error: 'La inversión no está en estado vendida.' });
+    await inv.update({ estado: 'en_curso', precio_venta_total: null, cuenta_ingreso_id: null, fecha_venta: null });
+    const result = await Inversion.findByPk(inv.id, {
+      include: [
+        { model: Cuenta,         as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
+        { model: Cuenta,         as: 'cuenta_ingreso', attributes: ['id', 'nombre'] },
+        { model: CobroInversion, as: 'cobros', separate: true, order: [['fecha_cobro', 'ASC']] },
+      ],
+    });
+    res.json(mapInversion(result.toJSON()));
+  } catch (err) { next(err); }
+};
+
 const destroyInversion = async (req, res, next) => {
   try {
     const inv = await Inversion.findByPk(req.params.id, {
@@ -252,5 +286,5 @@ const destroyInversion = async (req, res, next) => {
 
 module.exports = {
   indexSueldos, storeSueldo, updateSueldo, destroySueldo, cobrarSueldo,
-  indexInversiones, storeInversion, registrarCobro, destroyInversion,
+  indexInversiones, storeInversion, updateInversion, resetearInversion, registrarCobro, destroyInversion,
 };

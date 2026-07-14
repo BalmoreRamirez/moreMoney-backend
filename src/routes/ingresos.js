@@ -16,6 +16,8 @@ router.post('/sueldos/:id/cobrar',  ctrl.cobrarSueldo);
 // Inversiones
 router.get('/inversiones',                 ctrl.indexInversiones);
 router.post('/inversiones',                ctrl.storeInversion);
+router.put('/inversiones/:id',             ctrl.updateInversion);
+router.post('/inversiones/:id/resetear',   ctrl.resetearInversion);
 router.post('/inversiones/:id/cobrar',     ctrl.registrarCobro);
 router.delete('/inversiones/:id',          ctrl.destroyInversion);
 
