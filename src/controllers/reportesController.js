@@ -176,4 +176,62 @@ const getFlujo = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getMensual, getFlujo, getFlujoTarjetas };
+// GET /api/reportes/historial-tarjetas?meses=6
+const getHistorialTarjetas = async (req, res, next) => {
+  try {
+    const meses = Math.min(Math.max(parseInt(req.query.meses) || 6, 1), 12);
+    const intervalo = meses - 1;
+
+    const [tarjetas, [normales], [cuotas]] = await Promise.all([
+      Tarjeta.findAll({ order: [['nombre', 'ASC']] }),
+      sequelize.query(
+        `SELECT tarjeta_id, TO_CHAR(fecha_compra,'YYYY-MM') AS mes,
+                COALESCE(SUM(monto::numeric),0) AS total
+         FROM compras_normales
+         WHERE fecha_compra >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '${intervalo} months'
+         GROUP BY tarjeta_id, TO_CHAR(fecha_compra,'YYYY-MM')`
+      ),
+      sequelize.query(
+        `SELECT ct.tarjeta_id, TO_CHAR(cm.fecha_estimada_pago,'YYYY-MM') AS mes,
+                COALESCE(SUM(cm.monto_cuota::numeric),0) AS total
+         FROM cuotas_mensuales cm
+         JOIN compras_tasa_cero ct ON ct.id = cm.tasa_cero_id
+         WHERE cm.fecha_estimada_pago >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '${intervalo} months'
+         GROUP BY ct.tarjeta_id, TO_CHAR(cm.fecha_estimada_pago,'YYYY-MM')`
+      ),
+    ]);
+
+    // Generar etiquetas de meses
+    const now  = new Date();
+    const labels = [];
+    for (let i = intervalo; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      labels.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    }
+
+    const normalesMap = {};
+    normales.forEach(r => {
+      if (!normalesMap[r.tarjeta_id]) normalesMap[r.tarjeta_id] = {};
+      normalesMap[r.tarjeta_id][r.mes] = parseFloat(r.total);
+    });
+
+    const cuotasMap = {};
+    cuotas.forEach(r => {
+      if (!cuotasMap[r.tarjeta_id]) cuotasMap[r.tarjeta_id] = {};
+      cuotasMap[r.tarjeta_id][r.mes] = parseFloat(r.total);
+    });
+
+    const data = tarjetas.map(t => ({
+      id:       t.id,
+      nombre:   t.nombre,
+      banco:    t.banco,
+      normales: labels.map(m => normalesMap[t.id]?.[m] || 0),
+      cuotas:   labels.map(m => cuotasMap[t.id]?.[m]  || 0),
+      totales:  labels.map(m => (normalesMap[t.id]?.[m] || 0) + (cuotasMap[t.id]?.[m] || 0)),
+    }));
+
+    res.json({ meses: labels, tarjetas: data });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getMensual, getFlujo, getFlujoTarjetas, getHistorialTarjetas };

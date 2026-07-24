@@ -37,6 +37,45 @@ const dashboardStats = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// GET /api/cuentas/flujo-mes?year=YYYY&month=MM
+const flujoMes = async (req, res, next) => {
+  try {
+    const year  = parseInt(req.query.year)  || new Date().getFullYear();
+    const month = parseInt(req.query.month) || (new Date().getMonth() + 1);
+
+    const [cuentas, [rows]] = await Promise.all([
+      Cuenta.findAll({ order: [['created_at', 'ASC']] }),
+      sequelize.query(
+        `SELECT cuenta_id,
+           COALESCE(SUM(CASE WHEN tipo='ingreso' THEN monto::numeric ELSE 0 END),0) AS ingresos,
+           COALESCE(SUM(CASE WHEN tipo='egreso'  THEN monto::numeric ELSE 0 END),0) AS egresos
+         FROM transacciones
+         WHERE EXTRACT(YEAR FROM fecha) = :year AND EXTRACT(MONTH FROM fecha) = :month
+         GROUP BY cuenta_id`,
+        { replacements: { year, month } }
+      ),
+    ]);
+
+    const flujoMap = Object.fromEntries(rows.map(r => [
+      r.cuenta_id,
+      { ingresos: parseFloat(r.ingresos), egresos: parseFloat(r.egresos) },
+    ]));
+
+    const saldos = await Promise.all(cuentas.map(c => Cuenta.calcularSaldo(c.id, sequelize)));
+
+    const data = cuentas.map((c, i) => ({
+      id:           c.id,
+      nombre:       c.nombre,
+      tipo:         c.tipo,
+      saldo_actual: saldos[i].saldo_actual,
+      ingresos:     flujoMap[c.id]?.ingresos ?? 0,
+      egresos:      flujoMap[c.id]?.egresos  ?? 0,
+    }));
+
+    res.json({ data, year, month });
+  } catch (err) { next(err); }
+};
+
 // Saldo dinámico de una cuenta (usado en escrituras puntuales)
 async function saldoCuenta(cuentaId) {
   return Cuenta.calcularSaldo(cuentaId, sequelize);
@@ -243,4 +282,4 @@ const transferir = async (req, res, next) => {
   } catch (err) { await t.rollback(); next(err); }
 };
 
-module.exports = { index, store, update, destroy, transacciones, storeTransaccion, destroyTransaccion, dashboardStats, transferir };
+module.exports = { index, store, update, destroy, transacciones, storeTransaccion, destroyTransaccion, dashboardStats, flujoMes, transferir };

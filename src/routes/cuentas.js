@@ -6,6 +6,7 @@ const ctrl = require('../controllers/cuentasController');
 const router = Router();
 
 router.get('/stats',       ctrl.dashboardStats);
+router.get('/flujo-mes',   ctrl.flujoMes);
 router.post('/transferir', ctrl.transferir);
 router.get('/',            ctrl.index);
 router.post('/',   ctrl.store);
