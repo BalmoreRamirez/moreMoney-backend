@@ -46,6 +46,19 @@ const storeNormal = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const updateNormal = async (req, res, next) => {
+  try {
+    const compra = await CompraNormal.findByPk(req.params.id);
+    if (!compra) return res.status(404).json({ error: 'Compra no encontrada' });
+    const { tarjeta_id, nombre, monto, fecha_compra, estado } = req.body;
+    await compra.update({ tarjeta_id, nombre, monto, fecha_compra, estado });
+    const result = await CompraNormal.findByPk(compra.id, {
+      include: [{ model: Tarjeta, as: 'tarjeta', attributes: ['id', 'nombre', 'banco'] }],
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
 const destroyNormal = async (req, res, next) => {
   try {
     const compra = await CompraNormal.findByPk(req.params.id);
@@ -206,4 +219,4 @@ const destroyTasaCero = async (req, res, next) => {
   }
 };
 
-module.exports = { indexNormales, storeNormal, destroyNormal, indexTasaCero, storeTasaCero, updateTasaCero, destroyTasaCero };
+module.exports = { indexNormales, storeNormal, updateNormal, destroyNormal, indexTasaCero, storeTasaCero, updateTasaCero, destroyTasaCero };
