@@ -45,8 +45,6 @@ const store = async (req, res, next) => {
   }
 };
 
-// C3: Solo se permite editar la descripcion. Monto, cuenta y fecha son inmutables
-// para preservar la integridad del historial de saldos.
 const update = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
@@ -58,8 +56,38 @@ const update = async (req, res, next) => {
       return res.status(404).json({ error: 'Egreso no encontrado' });
     }
 
-    const { descripcion } = req.body;
-    await egreso.update({ descripcion }, { transaction: t });
+    const { descripcion, monto, fecha, cuenta_id } = req.body;
+
+    const nuevoMonto    = monto     != null ? parseFloat(monto)    : parseFloat(egreso.monto);
+    const nuevaCuentaId = cuenta_id != null ? parseInt(cuenta_id)  : egreso.cuenta_id;
+    const mismasCuenta  = nuevaCuentaId === egreso.cuenta_id;
+
+    if (mismasCuenta) {
+      // El egreso ya está restado: disponible real = saldo_actual + monto_anterior
+      const { saldo_actual } = await Cuenta.calcularSaldo(nuevaCuentaId, sequelize);
+      const disponible = saldo_actual + parseFloat(egreso.monto);
+      if (nuevoMonto > disponible) {
+        await t.rollback();
+        return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${disponible.toFixed(2)}` });
+      }
+    } else {
+      // Cuenta distinta: verificar que la nueva cuenta tenga saldo suficiente
+      const { saldo_actual } = await Cuenta.calcularSaldo(nuevaCuentaId, sequelize);
+      if (nuevoMonto > saldo_actual) {
+        await t.rollback();
+        return res.status(422).json({ error: `Saldo insuficiente en la cuenta seleccionada. Disponible: $${saldo_actual.toFixed(2)}` });
+      }
+    }
+
+    await egreso.update(
+      {
+        descripcion,
+        monto:     nuevoMonto,
+        fecha:     fecha != null ? fecha : egreso.fecha,
+        cuenta_id: nuevaCuentaId,
+      },
+      { transaction: t }
+    );
     await t.commit();
     res.json(egreso);
   } catch (e) {
