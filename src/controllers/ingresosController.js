@@ -43,12 +43,23 @@ const updateSueldo = async (req, res, next) => {
 };
 
 const destroySueldo = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const sueldo = await Sueldo.findByPk(req.params.id);
-    if (!sueldo) return res.status(404).json({ error: 'Sueldo no encontrado' });
-    await sueldo.destroy();
+    const sueldo = await Sueldo.findByPk(req.params.id, {
+      include: [{ model: CobroSueldo, as: 'cobros' }],
+    });
+    if (!sueldo) { await t.rollback(); return res.status(404).json({ error: 'Sueldo no encontrado' }); }
+
+    // A2: Bloquear eliminación si ya tiene cobros registrados
+    if (sueldo.cobros?.length) {
+      await t.rollback();
+      return res.status(422).json({ error: `No se puede eliminar "${sueldo.nombre}": tiene ${sueldo.cobros.length} cobro(s) registrado(s).` });
+    }
+
+    await sueldo.destroy({ transaction: t });
+    await t.commit();
     res.status(204).send();
-  } catch (err) { next(err); }
+  } catch (err) { await t.rollback(); next(err); }
 };
 
 // POST /api/ingresos/sueldos/:id/cobrar  { mes, anio, fecha_cobro? }
@@ -238,11 +249,25 @@ const registrarCobro = async (req, res, next) => {
 };
 
 const updateInversion = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
     const inv = await Inversion.findByPk(req.params.id);
-    if (!inv) return res.status(404).json({ error: 'Inversión no encontrada' });
+    if (!inv) { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
+
     const { nombre, precio_esperado, fecha_compra } = req.body;
-    await inv.update({ nombre, precio_esperado: precio_esperado || null, fecha_compra });
+    // M6: Guardar fecha anterior antes de update (inv.fecha_compra cambia en memoria tras update)
+    const fechaAnterior = inv.fecha_compra;
+    await inv.update({ nombre, precio_esperado: precio_esperado || null, fecha_compra }, { transaction: t });
+
+    if (fecha_compra && fecha_compra !== fechaAnterior) {
+      await Transaccion.update(
+        { fecha: fecha_compra },
+        { where: { referencia_tipo: 'inversion', referencia_id: inv.id }, transaction: t }
+      );
+    }
+
+    await t.commit();
+
     const result = await Inversion.findByPk(inv.id, {
       include: [
         { model: Cuenta,         as: 'cuenta_egreso',  attributes: ['id', 'nombre'] },
@@ -251,7 +276,7 @@ const updateInversion = async (req, res, next) => {
       ],
     });
     res.json(mapInversion(result.toJSON()));
-  } catch (err) { next(err); }
+  } catch (err) { await t.rollback(); next(err); }
 };
 
 const resetearInversion = async (req, res, next) => {
@@ -287,16 +312,25 @@ const resetearInversion = async (req, res, next) => {
 };
 
 const destroyInversion = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
     const inv = await Inversion.findByPk(req.params.id, {
       include: [{ model: CobroInversion, as: 'cobros' }],
     });
-    if (!inv) return res.status(404).json({ error: 'Inversión no encontrada' });
-    if (inv.estado === 'vendida') return res.status(422).json({ error: 'No se puede eliminar una inversión ya vendida.' });
-    if (inv.cobros?.length)       return res.status(422).json({ error: 'No se puede eliminar una inversión con cobros registrados.' });
-    await inv.destroy();
+    if (!inv) { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
+    if (inv.estado === 'vendida') { await t.rollback(); return res.status(422).json({ error: 'No se puede eliminar una inversión ya vendida.' }); }
+    if (inv.cobros?.length)       { await t.rollback(); return res.status(422).json({ error: 'No se puede eliminar una inversión con cobros registrados.' }); }
+
+    // A1: Revertir la transacción de egreso generada al crear la inversión
+    await Transaccion.destroy({
+      where: { referencia_tipo: 'inversion', referencia_id: inv.id },
+      transaction: t,
+    });
+
+    await inv.destroy({ transaction: t });
+    await t.commit();
     res.status(204).send();
-  } catch (err) { next(err); }
+  } catch (err) { await t.rollback(); next(err); }
 };
 
 module.exports = {

@@ -27,6 +27,11 @@ module.exports = (sequelize, DataTypes) => {
          GROUP BY c.id, c.saldo_inicial`,
         { replacements: { id: cuentaId } }
       );
+      if (!row) {
+        const err = new Error(`Cuenta ${cuentaId} no encontrada`);
+        err.status = 404;
+        throw err;
+      }
       const saldoInicial = parseFloat(row.saldo_inicial);
       const ingresos     = parseFloat(row.total_ingresos);
       const egresos      = parseFloat(row.total_egresos);

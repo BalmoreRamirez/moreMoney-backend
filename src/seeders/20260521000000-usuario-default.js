@@ -7,8 +7,8 @@ module.exports = {
         id: 1,
         usuario: 'balmore',
         correo: 'balmore@gmail.com',
-        // bcrypt hash de '1234567'
-        contrasena: '$2b$10$zw37Dz.57MW/Hk2kzO7aPeIY8sl0rKN.ZGbCq70saowhdGvWfveQC',
+        // Cambiar contraseña en producción via UPDATE en BD directamente
+        contrasena: '$2b$10$zYpbg.SoICYWVAMeSUArbeN7uQSKuu.kPl7eVjIHrJ7y.uW0iJVmW',
         created_at: new Date(),
         updated_at: new Date(),
       },

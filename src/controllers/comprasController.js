@@ -215,7 +215,10 @@ const destroyTasaCero = async (req, res, next) => {
     await compra.destroy(); // hook beforeDestroy valida cuotas pagadas
     res.status(204).send();
   } catch (err) {
-    res.status(422).json({ error: err.message });
+    if (err.message?.startsWith('No se puede eliminar')) {
+      return res.status(422).json({ error: err.message });
+    }
+    next(err);
   }
 };
 

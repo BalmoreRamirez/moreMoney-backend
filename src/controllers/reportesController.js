@@ -95,8 +95,8 @@ const getMensual = async (req, res, next) => {
         }),
       ]);
 
-      const total_normales = normalesRows.reduce((s, c) => s + parseFloat(c.monto), 0);
-      const total_cuotas   = cuotasRows.reduce((s, c) => s + parseFloat(c.monto_cuota), 0);
+      const total_normales = parseFloat(normalesRows.reduce((s, c) => s + parseFloat(c.monto), 0).toFixed(2));
+      const total_cuotas   = parseFloat(cuotasRows.reduce((s, c) => s + parseFloat(c.monto_cuota), 0).toFixed(2));
 
       return {
         tarjeta_id:      t.id,
@@ -105,7 +105,7 @@ const getMensual = async (req, res, next) => {
         dia_pago:        t.dia_pago,
         total_normales,
         total_cuotas,
-        total:           total_normales + total_cuotas,
+        total:           parseFloat((total_normales + total_cuotas).toFixed(2)),
         normales_count:  normalesRows.length,
         cuotas_detalle:  cuotasRows.map(c => ({
           nombre_compra: c.compra_tasa_cero.nombre,
@@ -116,7 +116,7 @@ const getMensual = async (req, res, next) => {
       };
     }));
 
-    const grand_total = resumen.reduce((s, r) => s + r.total, 0);
+    const grand_total = parseFloat(resumen.reduce((s, r) => s + r.total, 0).toFixed(2));
 
     res.json({ year, month, resumen, grand_total });
   } catch (err) { next(err); }

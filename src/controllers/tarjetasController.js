@@ -113,8 +113,10 @@ const destroy = async (req, res, next) => {
     await tarjeta.destroy();
     res.status(204).send();
   } catch (err) {
-    // El hook beforeDestroy lanza un Error con el mensaje de negocio
-    res.status(422).json({ error: err.message });
+    if (err.message?.startsWith('No se puede eliminar')) {
+      return res.status(422).json({ error: err.message });
+    }
+    next(err);
   }
 };
 

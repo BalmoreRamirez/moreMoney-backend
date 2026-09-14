@@ -143,8 +143,8 @@ const getDetallePago = async (req, res, next) => {
       order: [['fecha_estimada_pago', 'ASC']],
     });
 
-    const total_normales = compras_normales.reduce((s, c) => s + parseFloat(c.monto), 0);
-    const total_cuotas   = cuotas.reduce((s, c) => s + parseFloat(c.monto_cuota), 0);
+    const total_normales = parseFloat(compras_normales.reduce((s, c) => s + parseFloat(c.monto), 0).toFixed(2));
+    const total_cuotas   = parseFloat(cuotas.reduce((s, c) => s + parseFloat(c.monto_cuota), 0).toFixed(2));
 
     res.json({
       tarjeta,
@@ -154,7 +154,7 @@ const getDetallePago = async (req, res, next) => {
       cuotas,
       total_normales,
       total_cuotas,
-      total: total_normales + total_cuotas,
+      total: parseFloat((total_normales + total_cuotas).toFixed(2)),
     });
   } catch (err) { next(err); }
 };

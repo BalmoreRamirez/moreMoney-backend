@@ -38,15 +38,22 @@ function generarCuotasCompuesto(capital, tasa, n, fechaInicio) {
 
   let saldo = cap;
   return Array.from({ length: n }, (_, i) => {
-    const interesCuota  = parseFloat((saldo * r).toFixed(2));
-    const capitalCuota  = parseFloat((cuotaFija - interesCuota).toFixed(2));
+    const esUltima     = i === n - 1;
+    const interesCuota = parseFloat((saldo * r).toFixed(2));
+    // B1: Última cuota absorbe el saldo restante para evitar error acumulado de redondeo
+    const capitalCuota = esUltima
+      ? parseFloat(saldo.toFixed(2))
+      : parseFloat((cuotaFija - interesCuota).toFixed(2));
+    const totalCuota   = esUltima
+      ? parseFloat((capitalCuota + interesCuota).toFixed(2))
+      : cuotaFija;
     saldo = parseFloat((saldo - capitalCuota).toFixed(2));
 
     return {
       numero_cuota:      i + 1,
       capital_cuota:     capitalCuota,
       interes_cuota:     interesCuota,
-      monto_total_cuota: cuotaFija,
+      monto_total_cuota: totalCuota,
       fecha_estimada:    sumarFechaMeses(fechaInicio, i + 1),
       estado:            'pendiente',
     };
@@ -182,6 +189,15 @@ const pagarCuota = async (req, res, next) => {
     const cuota = credito.cuotas.find(q => q.id === parseInt(req.params.cuotaId));
     if (!cuota)               { await t.rollback(); return res.status(404).json({ error: 'Cuota no encontrada' }); }
     if (cuota.estado === 'pagada') { await t.rollback(); return res.status(422).json({ error: 'Esta cuota ya fue pagada.' }); }
+
+    // A3: Solo se puede pagar la primera cuota pendiente en orden
+    const primeraPendiente = credito.cuotas
+      .filter(q => q.estado === 'pendiente')
+      .sort((a, b) => a.numero_cuota - b.numero_cuota)[0];
+    if (!primeraPendiente || primeraPendiente.id !== cuota.id) {
+      await t.rollback();
+      return res.status(422).json({ error: `Debes pagar las cuotas en orden. La siguiente es la cuota ${primeraPendiente?.numero_cuota}.` });
+    }
 
     const { cuenta_pago_id, fecha_pago } = req.body;
     if (!cuenta_pago_id || !fecha_pago) {
