@@ -68,7 +68,7 @@ const show = async (req, res, next) => {
 const store = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, cuenta_id } = req.body;
+    const { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, dias_duracion, cuenta_id } = req.body;
 
     const cuenta = await Cuenta.findByPk(cuenta_id);
     if (!cuenta) { await t.rollback(); return res.status(404).json({ error: 'Cuenta no encontrada' }); }
@@ -80,7 +80,7 @@ const store = async (req, res, next) => {
     }
 
     const prestamo = await Prestamo.create(
-      { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, cuenta_id, estado: 'activo' },
+      { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, dias_duracion: dias_duracion || null, cuenta_id, estado: 'activo' },
       { transaction: t },
     );
 
@@ -115,7 +115,7 @@ const update = async (req, res, next) => {
       return res.status(422).json({ error: 'No se puede editar un préstamo con abonos registrados.' });
     }
 
-    const { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, cuenta_id } = req.body;
+    const { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, dias_duracion, cuenta_id } = req.body;
 
     // Verificar saldo: revertir el egreso original y chequear si alcanza el nuevo capital
     const capitalAnterior = parseFloat(prestamo.capital);
@@ -131,7 +131,7 @@ const update = async (req, res, next) => {
     }
 
     await prestamo.update(
-      { deudor_nombre, deudor_contacto: deudor_contacto || null, capital, tasa_interes_mensual, fecha_inicio, cuenta_id },
+      { deudor_nombre, deudor_contacto: deudor_contacto || null, capital, tasa_interes_mensual, fecha_inicio, dias_duracion: dias_duracion || null, cuenta_id },
       { transaction: t },
     );
 

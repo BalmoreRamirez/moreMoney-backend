@@ -17,6 +17,7 @@ module.exports = (sequelize, DataTypes) => {
     capital:              { type: DataTypes.DECIMAL(10,2), allowNull: false, validate: { min: 0.01 } },
     tasa_interes_mensual: { type: DataTypes.DECIMAL(5,4),  allowNull: false, validate: { min: 0 } },
     fecha_inicio:         { type: DataTypes.DATEONLY,      allowNull: false },
+    dias_duracion:        { type: DataTypes.INTEGER,       allowNull: true },
     estado:               { type: DataTypes.ENUM('activo', 'pagado'), allowNull: false, defaultValue: 'activo' },
     cuenta_id:            { type: DataTypes.INTEGER,       allowNull: false },
   }, {
