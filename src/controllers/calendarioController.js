@@ -127,7 +127,6 @@ const getDetallePago = async (req, res, next) => {
     const compras_normales = await CompraNormal.findAll({
       where: {
         tarjeta_id,
-        estado: 'pendiente',
         fecha_compra: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
       },
       order: [['fecha_compra', 'ASC']],
@@ -143,7 +142,7 @@ const getDetallePago = async (req, res, next) => {
       order: [['fecha_estimada_pago', 'ASC']],
     });
 
-    const total_normales = parseFloat(compras_normales.reduce((s, c) => s + parseFloat(c.monto), 0).toFixed(2));
+    const total_normales = parseFloat(compras_normales.filter(c => c.estado === 'pendiente').reduce((s, c) => s + parseFloat(c.monto), 0).toFixed(2));
     const total_cuotas   = parseFloat(cuotas.reduce((s, c) => s + parseFloat(c.monto_cuota), 0).toFixed(2));
 
     res.json({
