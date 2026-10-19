@@ -219,22 +219,6 @@ const confirmarPago = async (req, res, next) => {
       }
     }
 
-    // C5 — Idempotencia: verificar que no exista ya un pago para este ciclo
-    if (total > 0) {
-      const pagoExistente = await Transaccion.findOne({
-        where: {
-          referencia_tipo: 'pago_tarjeta',
-          referencia_id:   parseInt(tarjeta_id),
-          fecha: { [Op.between]: [ciclo.fechaInicio, ciclo.fechaFin] },
-        },
-        transaction: t,
-      });
-      if (pagoExistente) {
-        await t.rollback();
-        return res.status(409).json({ error: 'Este pago ya fue procesado para el ciclo actual.' });
-      }
-    }
-
     // C1 — Validar saldo disponible antes de debitar
     if (total > 0 && cuenta_id) {
       const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
