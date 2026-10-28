@@ -2,28 +2,12 @@
 
 const db = require('../models');
 const { Prestamo, PagoPrestamo, Cuenta, Transaccion, sequelize } = db;
+const { bloquearRegistros } = require('../utils/bloqueos');
+const { parsearCentavos, aCentavos, desdeCentavos } = require('../utils/montos');
+const { archivarMovimientos } = require('../utils/archivarMovimientos');
+const { calcularSaldoPrestamo } = require('../utils/saldosPrestamo');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
-
-function calcularSaldo(prestamo, pagos) {
-  const hoy    = new Date();
-  const inicio = new Date(prestamo.fecha_inicio + 'T00:00:00');
-
-  let meses = (hoy.getFullYear() - inicio.getFullYear()) * 12 + (hoy.getMonth() - inicio.getMonth());
-  // Si aún no llegó el día del aniversario mensual, no se cumplió ese mes
-  if (hoy.getDate() < inicio.getDate()) meses--;
-  const meses_transcurridos = Math.max(1, meses);
-
-  const capital             = parseFloat(prestamo.capital);
-  const tasa                = parseFloat(prestamo.tasa_interes_mensual);
-  const interes_generado    = parseFloat((capital * tasa * meses_transcurridos).toFixed(2));
-  const total_deuda         = parseFloat((capital + interes_generado).toFixed(2));
-  const total_pagado        = parseFloat(pagos.reduce((s, p) => s + parseFloat(p.monto), 0).toFixed(2));
-  const saldo_pendiente     = parseFloat((total_deuda - total_pagado).toFixed(2));
-  const ganancia            = parseFloat((total_pagado - capital).toFixed(2));
-
-  return { meses_transcurridos, interes_generado, total_deuda, total_pagado, saldo_pendiente, ganancia };
-}
 
 function includeBase() {
   return [
@@ -35,7 +19,7 @@ function includeBase() {
 function mapPrestamo(p) {
   const json  = p.toJSON ? p.toJSON() : p;
   const pagos = json.pagos || [];
-  return { ...json, ...calcularSaldo(json, pagos) };
+  return { ...json, ...calcularSaldoPrestamo(json, pagos) };
 }
 
 // ─── CRUD ────────────────────────────────────────────────────────────────────
@@ -70,10 +54,11 @@ const store = async (req, res, next) => {
   try {
     const { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, dias_duracion, cuenta_id } = req.body;
 
-    const cuenta = await Cuenta.findByPk(cuenta_id);
+    const cuentas = await bloquearRegistros(Cuenta, [cuenta_id], t);
+    const cuenta = cuentas.get(Number(cuenta_id));
     if (!cuenta) { await t.rollback(); return res.status(404).json({ error: 'Cuenta no encontrada' }); }
 
-    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+    const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
     if (parseFloat(capital) > saldo_actual) {
       await t.rollback();
       return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}` });
@@ -92,6 +77,7 @@ const store = async (req, res, next) => {
       fecha:           fecha_inicio,
       referencia_tipo: 'prestamo',
       referencia_id:   prestamo.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     await t.commit();
@@ -106,11 +92,13 @@ const update = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const prestamo = await Prestamo.findByPk(req.params.id, {
-      include: [{ model: PagoPrestamo, as: 'pagos' }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!prestamo) { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
 
-    if (prestamo.pagos.length > 0) {
+    const pagosExistentes = await PagoPrestamo.count({ where: { prestamo_id: prestamo.id }, transaction: t });
+    if (pagosExistentes > 0) {
       await t.rollback();
       return res.status(422).json({ error: 'No se puede editar un préstamo con abonos registrados.' });
     }
@@ -120,7 +108,12 @@ const update = async (req, res, next) => {
     // Verificar saldo: revertir el egreso original y chequear si alcanza el nuevo capital
     const capitalAnterior = parseFloat(prestamo.capital);
     const nuevoCapital    = parseFloat(capital);
-    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+    const cuentas = await bloquearRegistros(Cuenta, [prestamo.cuenta_id, cuenta_id], t);
+    if (!cuentas.has(Number(cuenta_id))) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Cuenta no encontrada' });
+    }
+    const { saldo_actual } = await Cuenta.calcularSaldo(Number(cuenta_id), sequelize, t);
     // saldo disponible = saldo_actual + lo que ya salió por este préstamo (si la cuenta es la misma)
     const mismaCuenta   = parseInt(prestamo.cuenta_id) === parseInt(cuenta_id);
     const saldoEfectivo = mismaCuenta ? saldo_actual + capitalAnterior : saldo_actual;
@@ -158,19 +151,30 @@ const destroy = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const prestamo = await Prestamo.findByPk(req.params.id, {
-      include: [{ model: PagoPrestamo, as: 'pagos' }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!prestamo) { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
 
-    if (prestamo.pagos.length > 0) {
+    const pagos = await PagoPrestamo.count({ where: { prestamo_id: prestamo.id }, transaction: t });
+    if (pagos > 0) {
       await t.rollback();
       return res.status(422).json({ error: 'No se puede eliminar un préstamo con abonos registrados.' });
     }
 
-    // Eliminar la transacción de egreso asociada
-    await Transaccion.destroy({
-      where: { referencia_tipo: 'prestamo', referencia_id: prestamo.id },
+    const movimientos = await Transaccion.findAll({
+      where: { tipo: 'egreso', referencia_tipo: 'prestamo', referencia_id: prestamo.id },
       transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (movimientos.length === 0) {
+      await t.rollback();
+      return res.status(409).json({ error: 'No se puede eliminar: falta el movimiento contable asociado al préstamo. Revisa la integridad de la cuenta.' });
+    }
+
+    // Archivar conserva el egreso: borrar la ficha no devuelve el dinero prestado.
+    await archivarMovimientos(movimientos, {
+      tipo: 'prestamo_archivado', entidad: 'préstamo', entidadId: prestamo.id, transaction: t,
     });
 
     await prestamo.destroy({ transaction: t });
@@ -186,32 +190,53 @@ const registrarAbono = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const prestamo = await Prestamo.findByPk(req.params.id, {
-      include: [{ model: PagoPrestamo, as: 'pagos' }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!prestamo)              { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
     if (prestamo.estado === 'pagado') { await t.rollback(); return res.status(422).json({ error: 'Este préstamo ya está pagado.' }); }
 
     const { monto, fecha_pago, nota } = req.body;
     if (!monto || !fecha_pago) { await t.rollback(); return res.status(422).json({ error: 'Se requieren monto y fecha de pago.' }); }
+    const montoCentavos = parsearCentavos(monto);
+    if (montoCentavos == null || montoCentavos <= 0) {
+      await t.rollback();
+      return res.status(422).json({ error: 'El monto del abono debe ser positivo y tener como máximo dos decimales.' });
+    }
+    const montoNumerico = desdeCentavos(montoCentavos);
+
+    const pagosActuales = await PagoPrestamo.findAll({ where: { prestamo_id: prestamo.id }, transaction: t });
+    const { saldo_pendiente: saldoPendiente } = calcularSaldoPrestamo(prestamo, pagosActuales);
+    if (montoCentavos > aCentavos(saldoPendiente)) {
+      await t.rollback();
+      return res.status(422).json({ error: `El abono supera el saldo pendiente de $${Math.max(0, saldoPendiente).toFixed(2)}.` });
+    }
+
+    const cuentas = await bloquearRegistros(Cuenta, [prestamo.cuenta_id], t);
+    if (!cuentas.has(Number(prestamo.cuenta_id))) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Cuenta del préstamo no encontrada.' });
+    }
 
     const pago = await PagoPrestamo.create(
-      { prestamo_id: prestamo.id, monto, fecha_pago, nota },
+      { prestamo_id: prestamo.id, monto: montoNumerico, fecha_pago, nota },
       { transaction: t },
     );
 
     await Transaccion.create({
       cuenta_id:       prestamo.cuenta_id,
       tipo:            'ingreso',
-      monto,
+      monto:            montoNumerico,
       descripcion:     `Abono préstamo — ${prestamo.deudor_nombre}`,
       fecha:           fecha_pago,
       referencia_tipo: 'pago_prestamo',
       referencia_id:   pago.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     // Auto-completar si el total de abonos cubre la deuda
-    const pagosSimulados = [...(prestamo.pagos || []), { monto: parseFloat(monto) }];
-    const { saldo_pendiente } = calcularSaldo(prestamo, pagosSimulados);
+    const pagosSimulados = [...pagosActuales, { monto: montoNumerico }];
+    const { saldo_pendiente } = calcularSaldoPrestamo(prestamo, pagosSimulados);
     if (saldo_pendiente <= 0) {
       await prestamo.update({ estado: 'pagado' }, { transaction: t });
     }
@@ -227,27 +252,59 @@ const registrarAbono = async (req, res, next) => {
 const updateAbono = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
+    const prestamo = await Prestamo.findByPk(req.params.id, {
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (!prestamo) { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
     const pago = await PagoPrestamo.findOne({
       where: { id: req.params.abonoId, prestamo_id: req.params.id },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!pago) { await t.rollback(); return res.status(404).json({ error: 'Abono no encontrado' }); }
 
     const { monto, fecha_pago, nota } = req.body;
     if (!monto || !fecha_pago) { await t.rollback(); return res.status(422).json({ error: 'Se requieren monto y fecha de pago.' }); }
+    const montoCentavos = parsearCentavos(monto);
+    if (montoCentavos == null || montoCentavos <= 0) {
+      await t.rollback();
+      return res.status(422).json({ error: 'El monto del abono debe ser positivo y tener como máximo dos decimales.' });
+    }
+    const montoNumerico = desdeCentavos(montoCentavos);
 
-    await pago.update({ monto: parseFloat(monto), fecha_pago, nota: nota ?? pago.nota }, { transaction: t });
+    const pagosActuales = await PagoPrestamo.findAll({ where: { prestamo_id: prestamo.id }, transaction: t });
+    const pagosSinEste = pagosActuales.filter((pagoActual) => pagoActual.id !== pago.id);
+    const { saldo_pendiente: saldoSinEste } = calcularSaldoPrestamo(prestamo, pagosSinEste);
+    if (montoCentavos > aCentavos(saldoSinEste)) {
+      await t.rollback();
+      return res.status(422).json({ error: `El abono supera el saldo pendiente de $${Math.max(0, saldoSinEste).toFixed(2)}.` });
+    }
+    const cuentas = await bloquearRegistros(Cuenta, [prestamo.cuenta_id], t);
+    const cuenta = cuentas.get(Number(prestamo.cuenta_id));
+    if (!cuenta) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Cuenta del préstamo no encontrada.' });
+    }
+    if (montoNumerico < parseFloat(pago.monto)) {
+      const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
+      const reversoCentavos = aCentavos(pago.monto) - montoCentavos;
+      if (reversoCentavos > aCentavos(saldo_actual)) {
+        await t.rollback();
+        return res.status(422).json({ error: 'No se puede reducir el abono: la cuenta no conserva el monto que debe revertirse.' });
+      }
+    }
+
+    await pago.update({ monto: montoNumerico, fecha_pago, nota: nota ?? pago.nota }, { transaction: t });
 
     await Transaccion.update(
-      { monto: parseFloat(monto), fecha: fecha_pago },
+      { monto: montoNumerico, fecha: fecha_pago },
       { where: { referencia_tipo: 'pago_prestamo', referencia_id: pago.id }, transaction: t },
     );
 
     // Re-evaluar si el préstamo debe pasar a pagado o volver a activo
-    const prestamo = await Prestamo.findByPk(req.params.id, {
-      include: [{ model: PagoPrestamo, as: 'pagos' }],
-      transaction: t,
-    });
-    const { saldo_pendiente } = calcularSaldo(prestamo, prestamo.pagos);
+    const pagosActualizados = await PagoPrestamo.findAll({ where: { prestamo_id: prestamo.id }, transaction: t });
+    const { saldo_pendiente } = calcularSaldoPrestamo(prestamo, pagosActualizados);
     const nuevoEstado = saldo_pendiente <= 0 ? 'pagado' : 'activo';
     if (prestamo.estado !== nuevoEstado) {
       await prestamo.update({ estado: nuevoEstado }, { transaction: t });
@@ -264,10 +321,25 @@ const updateAbono = async (req, res, next) => {
 const destroyAbono = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
+    const prestamo = await Prestamo.findByPk(req.params.id, {
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (!prestamo) { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
     const pago = await PagoPrestamo.findOne({
       where: { id: req.params.abonoId, prestamo_id: req.params.id },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!pago) { await t.rollback(); return res.status(404).json({ error: 'Abono no encontrado' }); }
+
+    const cuentas = await bloquearRegistros(Cuenta, [prestamo.cuenta_id], t);
+    const cuenta = cuentas.get(Number(prestamo.cuenta_id));
+    const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
+    if (aCentavos(pago.monto) > aCentavos(saldo_actual)) {
+      await t.rollback();
+      return res.status(422).json({ error: 'No se puede borrar el abono: el saldo actual de la cuenta no cubre su reversión.' });
+    }
 
     await Transaccion.destroy({
       where: { referencia_tipo: 'pago_prestamo', referencia_id: pago.id },
@@ -276,11 +348,8 @@ const destroyAbono = async (req, res, next) => {
     await pago.destroy({ transaction: t });
 
     // Si el préstamo estaba pagado y se borra un abono, vuelve a activo
-    const prestamo = await Prestamo.findByPk(req.params.id, {
-      include: [{ model: PagoPrestamo, as: 'pagos' }],
-      transaction: t,
-    });
-    const { saldo_pendiente } = calcularSaldo(prestamo, prestamo.pagos);
+    const pagosRestantes = await PagoPrestamo.findAll({ where: { prestamo_id: prestamo.id }, transaction: t });
+    const { saldo_pendiente } = calcularSaldoPrestamo(prestamo, pagosRestantes);
     if (saldo_pendiente > 0 && prestamo.estado === 'pagado') {
       await prestamo.update({ estado: 'activo' }, { transaction: t });
     }
@@ -299,13 +368,46 @@ const marcarPagado = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const prestamo = await Prestamo.findByPk(req.params.id, {
-      include: [{ model: PagoPrestamo, as: 'pagos' }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!prestamo)              { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
     if (prestamo.estado === 'pagado') { await t.rollback(); return res.status(422).json({ error: 'Este préstamo ya está marcado como pagado.' }); }
 
-    // Los abonos ya registraron ingresos por el monto completo (capital + interés).
-    // Solo se actualiza el estado; no se crea ninguna transacción adicional.
+    const pagos = await PagoPrestamo.findAll({ where: { prestamo_id: prestamo.id }, transaction: t });
+    const { saldo_pendiente: saldoPendiente } = calcularSaldoPrestamo(prestamo, pagos);
+    const saldoPendienteCentavos = aCentavos(saldoPendiente);
+    if (saldoPendienteCentavos < 0) {
+      await t.rollback();
+      return res.status(422).json({ error: 'El préstamo tiene abonos por encima de la deuda calculada; revisa los movimientos antes de cerrarlo.' });
+    }
+
+    if (saldoPendienteCentavos > 0) {
+      const cuentas = await bloquearRegistros(Cuenta, [prestamo.cuenta_id], t);
+      if (!cuentas.has(Number(prestamo.cuenta_id))) {
+        await t.rollback();
+        return res.status(404).json({ error: 'Cuenta del préstamo no encontrada.' });
+      }
+      const fechaPago = new Date().toISOString().slice(0, 10);
+      const montoFinal = desdeCentavos(saldoPendienteCentavos);
+      const pagoFinal = await PagoPrestamo.create({
+        prestamo_id: prestamo.id,
+        monto: montoFinal,
+        fecha_pago: fechaPago,
+        nota: 'Pago final confirmado',
+      }, { transaction: t });
+      await Transaccion.create({
+        cuenta_id: prestamo.cuenta_id,
+        tipo: 'ingreso',
+        monto: montoFinal,
+        descripcion: `Pago final préstamo — ${prestamo.deudor_nombre}`,
+        fecha: fechaPago,
+        referencia_tipo: 'pago_prestamo',
+        referencia_id: pagoFinal.id,
+        usuario_id: req.usuario?.id || null,
+      }, { transaction: t });
+    }
+
     await prestamo.update({ estado: 'pagado' }, { transaction: t });
     await t.commit();
 

@@ -1,38 +1,9 @@
 'use strict';
 
-const { Op } = require('sequelize');
 const db = require('../models');
 const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, Cuenta, sequelize } = db;
-
-async function calcularSaldos(tarjetaId) {
-  const [[row]] = await sequelize.query(
-    `SELECT
-       t.limite_credito,
-       COALESCE((
-         SELECT SUM(cn.monto) FROM compras_normales cn
-         WHERE cn.tarjeta_id = :id AND cn.estado = 'pendiente'
-       ), 0) AS sum_normales,
-       COALESCE((
-         SELECT SUM(ctc.monto_total) FROM compras_tasa_cero ctc
-         WHERE ctc.tarjeta_id = :id AND ctc.estado = 'activa'
-       ), 0) AS sum_tasa_cero,
-       COALESCE((
-         SELECT SUM(cm.monto_cuota) FROM cuotas_mensuales cm
-         INNER JOIN compras_tasa_cero ctc ON cm.tasa_cero_id = ctc.id
-         WHERE ctc.tarjeta_id = :id AND ctc.estado = 'activa' AND cm.estado = 'pagada'
-       ), 0) AS sum_cuotas_pagadas
-     FROM tarjetas t WHERE t.id = :id`,
-    { replacements: { id: tarjetaId } }
-  );
-
-  const limite = parseFloat(row.limite_credito);
-  const gastado = parseFloat(row.sum_normales) + parseFloat(row.sum_tasa_cero) - parseFloat(row.sum_cuotas_pagadas);
-  return {
-    limite_credito: limite,
-    saldo_gastado: Math.max(0, gastado),
-    saldo_disponible: limite - Math.max(0, gastado),
-  };
-}
+const { bloquearRegistros } = require('../utils/bloqueos');
+const { calcularSaldosTarjeta } = require('../utils/saldosTarjeta');
 
 const index = async (req, res, next) => {
   try {
@@ -47,7 +18,7 @@ const index = async (req, res, next) => {
 
     const data = await Promise.all(rows.map(async (t) => ({
       ...t.toJSON(),
-      ...(await calcularSaldos(t.id)),
+      ...(await calcularSaldosTarjeta(sequelize, t.id)),
     })));
 
     res.json({ data, total: count, page, limit, totalPages: Math.ceil(count / limit) });
@@ -72,7 +43,7 @@ const show = async (req, res, next) => {
     });
     if (!tarjeta) return res.status(404).json({ error: 'Tarjeta no encontrada' });
 
-    const saldos = await calcularSaldos(tarjeta.id);
+    const saldos = await calcularSaldosTarjeta(sequelize, tarjeta.id);
 
     const compras_normales = await CompraNormal.findAll({
       where: { tarjeta_id: tarjeta.id },
@@ -90,29 +61,62 @@ const show = async (req, res, next) => {
 };
 
 const update = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const tarjeta = await Tarjeta.findByPk(req.params.id);
-    if (!tarjeta) return res.status(404).json({ error: 'Tarjeta no encontrada' });
+    const tarjetas = await bloquearRegistros(Tarjeta, [req.params.id], t);
+    const tarjeta = tarjetas.get(Number(req.params.id));
+    if (!tarjeta) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Tarjeta no encontrada' });
+    }
 
     const { nombre, banco, limite_credito, dia_corte, dia_pago, cuenta_pago_id } = req.body;
+    const saldos = await calcularSaldosTarjeta(sequelize, tarjeta.id, t);
+    const nuevoLimite = limite_credito !== undefined ? Number(limite_credito) : parseFloat(tarjeta.limite_credito);
+    if (!Number.isFinite(nuevoLimite) || nuevoLimite < saldos.saldo_gastado) {
+      await t.rollback();
+      return res.status(422).json({ error: `El límite no puede ser menor que el saldo utilizado ($${saldos.saldo_gastado.toFixed(2)}).` });
+    }
     await tarjeta.update({
-      nombre, banco, limite_credito, dia_corte, dia_pago,
+      nombre: nombre ?? tarjeta.nombre,
+      banco: banco ?? tarjeta.banco,
+      limite_credito: nuevoLimite,
+      dia_corte: dia_corte ?? tarjeta.dia_corte,
+      dia_pago: dia_pago ?? tarjeta.dia_pago,
       cuenta_pago_id: cuenta_pago_id !== undefined
         ? (cuenta_pago_id ? parseInt(cuenta_pago_id) : null)
         : tarjeta.cuenta_pago_id,
-    });
+    }, { transaction: t });
+    await t.commit();
     res.json(tarjeta);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
 };
 
 const destroy = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const tarjeta = await Tarjeta.findByPk(req.params.id);
-    if (!tarjeta) return res.status(404).json({ error: 'Tarjeta no encontrada' });
+    const tarjetas = await bloquearRegistros(Tarjeta, [req.params.id], t);
+    const tarjeta = tarjetas.get(Number(req.params.id));
+    if (!tarjeta) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Tarjeta no encontrada' });
+    }
 
-    await tarjeta.destroy();
+    const comprasNormales = await CompraNormal.count({ where: { tarjeta_id: tarjeta.id }, transaction: t });
+    const comprasTasaCero = await CompraTasaCero.count({ where: { tarjeta_id: tarjeta.id }, transaction: t });
+    if (comprasNormales || comprasTasaCero) {
+      await t.rollback();
+      return res.status(422).json({ error: 'No se puede eliminar una tarjeta con compras registradas.' });
+    }
+
+    await tarjeta.destroy({ transaction: t });
+    await t.commit();
     res.status(204).send();
   } catch (err) {
+    await t.rollback();
     if (err.message?.startsWith('No se puede eliminar')) {
       return res.status(422).json({ error: err.message });
     }

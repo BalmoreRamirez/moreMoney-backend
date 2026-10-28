@@ -15,7 +15,7 @@ module.exports = (sequelize, DataTypes) => {
       });
     }
 
-    static async calcularSaldo(cuentaId, sequelizeInstance) {
+    static async calcularSaldo(cuentaId, sequelizeInstance, transaction = null) {
       const [[row]] = await sequelizeInstance.query(
         `SELECT
            c.saldo_inicial,
@@ -25,7 +25,7 @@ module.exports = (sequelize, DataTypes) => {
          LEFT JOIN transacciones t ON t.cuenta_id = c.id
          WHERE c.id = :id
          GROUP BY c.id, c.saldo_inicial`,
-        { replacements: { id: cuentaId } }
+        { replacements: { id: cuentaId }, transaction }
       );
       if (!row) {
         const err = new Error(`Cuenta ${cuentaId} no encontrada`);

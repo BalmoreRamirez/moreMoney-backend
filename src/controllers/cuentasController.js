@@ -2,6 +2,7 @@
 
 const db = require('../models');
 const { Cuenta, Transaccion, sequelize } = db;
+const { bloquearRegistros } = require('../utils/bloqueos');
 
 // GET /api/cuentas/stats?year=YYYY&month=MM
 const dashboardStats = async (req, res, next) => {
@@ -126,25 +127,35 @@ const store = async (req, res, next) => {
 
 // PUT /api/cuentas/:id
 const update = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const cuenta = await Cuenta.findByPk(req.params.id);
-    if (!cuenta) return res.status(404).json({ error: 'Cuenta no encontrada' });
+    const cuentas = await bloquearRegistros(Cuenta, [req.params.id], t);
+    const cuenta = cuentas.get(Number(req.params.id));
+    if (!cuenta) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Cuenta no encontrada' });
+    }
 
     const { nombre, tipo, saldo_inicial } = req.body;
 
     // A1: saldo_inicial es inmutable una vez que existen transacciones
     if (saldo_inicial !== undefined && parseFloat(saldo_inicial) !== parseFloat(cuenta.saldo_inicial)) {
-      const txCount = await Transaccion.count({ where: { cuenta_id: cuenta.id } });
+      const txCount = await Transaccion.count({ where: { cuenta_id: cuenta.id }, transaction: t });
       if (txCount > 0) {
+        await t.rollback();
         return res.status(422).json({
           error: `No se puede modificar el saldo inicial de "${cuenta.nombre}": tiene ${txCount} transacción(es) registrada(s). El saldo inicial solo se puede cambiar antes del primer movimiento.`,
         });
       }
     }
 
-    await cuenta.update({ nombre, tipo, saldo_inicial });
+    await cuenta.update({ nombre, tipo, saldo_inicial }, { transaction: t });
+    await t.commit();
     res.json({ ...cuenta.toJSON(), ...(await saldoCuenta(cuenta.id)) });
-  } catch (err) { next(err); }
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
 };
 
 // DELETE /api/cuentas/:id
@@ -188,11 +199,23 @@ const transacciones = async (req, res, next) => {
 
 // POST /api/cuentas/:id/transacciones  (transacción manual)
 const storeTransaccion = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const cuenta = await Cuenta.findByPk(req.params.id);
-    if (!cuenta) return res.status(404).json({ error: 'Cuenta no encontrada' });
+    const cuentas = await bloquearRegistros(Cuenta, [req.params.id], t);
+    const cuenta = cuentas.get(Number(req.params.id));
+    if (!cuenta) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Cuenta no encontrada' });
+    }
 
     const { tipo, monto, descripcion, fecha } = req.body;
+    if (tipo === 'egreso') {
+      const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
+      if (parseFloat(monto) > saldo_actual) {
+        await t.rollback();
+        return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}` });
+      }
+    }
     const tx = await Transaccion.create({
       cuenta_id:       cuenta.id,
       tipo,
@@ -201,22 +224,42 @@ const storeTransaccion = async (req, res, next) => {
       fecha:           fecha || new Date().toISOString().split('T')[0],
       referencia_tipo: 'manual',
       usuario_id:      req.usuario?.id || null,
-    });
+    }, { transaction: t });
+    await t.commit();
     res.status(201).json(tx);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
 };
 
 // DELETE /api/cuentas/transacciones/:id
 const destroyTransaccion = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const tx = await Transaccion.findByPk(req.params.id);
-    if (!tx) return res.status(404).json({ error: 'Transacción no encontrada' });
-    if (tx.referencia_tipo && tx.referencia_tipo !== 'manual') {
-      return res.status(422).json({ error: 'Solo se pueden eliminar transacciones registradas manualmente.' });
+    const tx = await Transaccion.findOne({
+      where: { id: req.params.id, referencia_tipo: 'manual' },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (!tx) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Transacción no encontrada' });
     }
-    await tx.destroy();
+    const cuentas = await bloquearRegistros(Cuenta, [tx.cuenta_id], t);
+    const cuenta = cuentas.get(Number(tx.cuenta_id));
+    const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
+    if (tx.tipo === 'ingreso' && parseFloat(tx.monto) > saldo_actual) {
+      await t.rollback();
+      return res.status(422).json({ error: 'No se puede eliminar el ingreso: la cuenta no conserva ese monto.' });
+    }
+    await tx.destroy({ transaction: t });
+    await t.commit();
     res.status(204).send();
-  } catch (err) { next(err); }
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
 };
 
 // POST /api/cuentas/transferir  { origen_id, destino_id, monto, descripcion?, fecha? }
@@ -234,14 +277,13 @@ const transferir = async (req, res, next) => {
       return res.status(422).json({ error: 'La cuenta de origen y destino deben ser diferentes.' });
     }
 
-    const [origen, destino] = await Promise.all([
-      Cuenta.findByPk(origen_id),
-      Cuenta.findByPk(destino_id),
-    ]);
+    const cuentas = await bloquearRegistros(Cuenta, [origen_id, destino_id], t);
+    const origen = cuentas.get(Number(origen_id));
+    const destino = cuentas.get(Number(destino_id));
     if (!origen)  { await t.rollback(); return res.status(404).json({ error: 'Cuenta de origen no encontrada.' }); }
     if (!destino) { await t.rollback(); return res.status(404).json({ error: 'Cuenta de destino no encontrada.' }); }
 
-    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(origen_id), sequelize);
+    const { saldo_actual } = await Cuenta.calcularSaldo(origen.id, sequelize, t);
     if (parseFloat(monto) > saldo_actual) {
       await t.rollback();
       return res.status(422).json({ error: `Saldo insuficiente en "${origen.nombre}". Disponible: $${saldo_actual.toFixed(2)}` });

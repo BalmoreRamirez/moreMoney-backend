@@ -2,13 +2,16 @@
 
 const db = require('../models');
 const { CreditoRecibido, CuotaCredito, Cuenta, Transaccion, sequelize } = db;
+const { bloquearRegistros } = require('../utils/bloqueos');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function sumarFechaMeses(fechaStr, meses) {
-  const d = new Date(fechaStr + 'T12:00:00');
-  d.setMonth(d.getMonth() + meses);
-  return d.toISOString().split('T')[0];
+  const [year, month, day] = fechaStr.split('-').map(Number);
+  const target = new Date(Date.UTC(year, month - 1 + meses, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target.toISOString().slice(0, 10);
 }
 
 function generarCuotasSimple(capital, tasa, n, fechaInicio) {
@@ -20,7 +23,9 @@ function generarCuotasSimple(capital, tasa, n, fechaInicio) {
 
   return Array.from({ length: n }, (_, i) => ({
     numero_cuota:      i + 1,
-    capital_cuota:     capitalCuota,
+    capital_cuota:     i === n - 1
+      ? parseFloat((cap - capitalCuota * (n - 1)).toFixed(2))
+      : capitalCuota,
     interes_cuota:     interesCuota,
     monto_total_cuota: totalCuota,
     fecha_estimada:    sumarFechaMeses(fechaInicio, i + 1),
@@ -139,6 +144,7 @@ const store = async (req, res, next) => {
       fecha:           fecha_inicio,
       referencia_tipo: 'credito_recibido',
       referencia_id:   credito.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     await t.commit();
@@ -153,14 +159,24 @@ const destroy = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const credito = await CreditoRecibido.findByPk(req.params.id, {
-      include: [{ model: CuotaCredito, as: 'cuotas' }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!credito) { await t.rollback(); return res.status(404).json({ error: 'Crédito no encontrado' }); }
 
-    const tienePagadas = credito.cuotas.some(q => q.estado === 'pagada');
+    const cuotas = await CuotaCredito.findAll({ where: { credito_id: credito.id }, transaction: t });
+    const tienePagadas = cuotas.some(q => q.estado === 'pagada');
     if (tienePagadas) {
       await t.rollback();
       return res.status(422).json({ error: 'No se puede eliminar un crédito con cuotas ya pagadas.' });
+    }
+
+    const cuentas = await bloquearRegistros(Cuenta, [credito.cuenta_id], t);
+    const cuenta = cuentas.get(Number(credito.cuenta_id));
+    const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
+    if (credito.capital > saldo_actual) {
+      await t.rollback();
+      return res.status(422).json({ error: 'No se puede eliminar el crédito: la cuenta no conserva el capital recibido para revertirlo.' });
     }
 
     await Transaccion.destroy({
@@ -181,17 +197,23 @@ const pagarCuota = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const credito = await CreditoRecibido.findByPk(req.params.id, {
-      include: [{ model: CuotaCredito, as: 'cuotas' }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!credito)            { await t.rollback(); return res.status(404).json({ error: 'Crédito no encontrado' }); }
     if (credito.estado === 'pagado') { await t.rollback(); return res.status(422).json({ error: 'Este crédito ya está pagado.' }); }
 
-    const cuota = credito.cuotas.find(q => q.id === parseInt(req.params.cuotaId));
+    const cuotas = await CuotaCredito.findAll({
+      where: { credito_id: credito.id },
+      order: [['numero_cuota', 'ASC']],
+      transaction: t,
+    });
+    const cuota = cuotas.find(q => q.id === parseInt(req.params.cuotaId));
     if (!cuota)               { await t.rollback(); return res.status(404).json({ error: 'Cuota no encontrada' }); }
     if (cuota.estado === 'pagada') { await t.rollback(); return res.status(422).json({ error: 'Esta cuota ya fue pagada.' }); }
 
     // A3: Solo se puede pagar la primera cuota pendiente en orden
-    const primeraPendiente = credito.cuotas
+    const primeraPendiente = cuotas
       .filter(q => q.estado === 'pendiente')
       .sort((a, b) => a.numero_cuota - b.numero_cuota)[0];
     if (!primeraPendiente || primeraPendiente.id !== cuota.id) {
@@ -205,23 +227,32 @@ const pagarCuota = async (req, res, next) => {
       return res.status(422).json({ error: 'Se requiere cuenta_pago_id y fecha_pago.' });
     }
 
-    const cuentaPago = await Cuenta.findByPk(cuenta_pago_id);
+    const cuentas = await bloquearRegistros(Cuenta, [cuenta_pago_id], t);
+    const cuentaPago = cuentas.get(Number(cuenta_pago_id));
     if (!cuentaPago) { await t.rollback(); return res.status(404).json({ error: 'Cuenta de pago no encontrada' }); }
+
+    const { saldo_actual } = await Cuenta.calcularSaldo(cuentaPago.id, sequelize, t);
+    const montoCuota = parseFloat(cuota.monto_total_cuota);
+    if (montoCuota > saldo_actual) {
+      await t.rollback();
+      return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}, requerido: $${montoCuota.toFixed(2)}` });
+    }
 
     await cuota.update({ estado: 'pagada', fecha_pago }, { transaction: t });
 
     await Transaccion.create({
-      cuenta_id:       cuenta_pago_id,
+      cuenta_id:       cuentaPago.id,
       tipo:            'egreso',
       monto:           cuota.monto_total_cuota,
       descripcion:     `Cuota ${cuota.numero_cuota}/${credito.num_cuotas} — ${credito.nombre}`,
       fecha:           fecha_pago,
       referencia_tipo: 'cuota_credito',
       referencia_id:   cuota.id,
+      usuario_id:      req.usuario?.id || null,
     }, { transaction: t });
 
     // Si todas las cuotas están pagadas, marcar el crédito como pagado
-    const todasPagadas = credito.cuotas.every(q => q.id === cuota.id || q.estado === 'pagada');
+    const todasPagadas = cuotas.every(q => q.id === cuota.id || q.estado === 'pagada');
     if (todasPagadas) {
       await credito.update({ estado: 'pagado' }, { transaction: t });
     }

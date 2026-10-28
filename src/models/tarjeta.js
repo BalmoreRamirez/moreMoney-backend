@@ -22,7 +22,7 @@ module.exports = (sequelize, DataTypes) => {
     // Fórmula de saldo dinámico según reglas del negocio
     static async calcularSaldos(tarjetaId, models) {
       const { CompraNormal, CompraTasaCero, CuotaMensual } = models;
-      const { Op, fn, col, literal } = require('sequelize');
+      const { fn, col, literal } = require('sequelize');
 
       const [sumaNormales] = await CompraNormal.findAll({
         attributes: [[fn('COALESCE', fn('SUM', col('monto')), literal('0')), 'total']],
@@ -114,17 +114,17 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   // Restricción: no eliminar si tiene compras asociadas
-  Tarjeta.addHook('beforeDestroy', async (tarjeta, options) => {
+  Tarjeta.addHook('beforeDestroy', async (tarjeta, options = {}) => {
     const { CompraNormal, CompraTasaCero } = sequelize.models;
 
-    const normales = await CompraNormal.count({ where: { tarjeta_id: tarjeta.id } });
+    const normales = await CompraNormal.count({ where: { tarjeta_id: tarjeta.id }, transaction: options.transaction });
     if (normales > 0) {
       throw new Error(
         `No se puede eliminar la tarjeta "${tarjeta.nombre}": tiene ${normales} compra(s) normal(es) registrada(s).`
       );
     }
 
-    const tasaCero = await CompraTasaCero.count({ where: { tarjeta_id: tarjeta.id } });
+    const tasaCero = await CompraTasaCero.count({ where: { tarjeta_id: tarjeta.id }, transaction: options.transaction });
     if (tasaCero > 0) {
       throw new Error(
         `No se puede eliminar la tarjeta "${tarjeta.nombre}": tiene ${tasaCero} compra(s) a tasa cero registrada(s).`

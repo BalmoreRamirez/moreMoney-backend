@@ -62,11 +62,12 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   // Restricción: no eliminar si tiene al menos una cuota pagada
-  CompraTasaCero.addHook('beforeDestroy', async (compra, options) => {
+  CompraTasaCero.addHook('beforeDestroy', async (compra, options = {}) => {
     const { CuotaMensual } = sequelize.models;
 
     const cuotasPagadas = await CuotaMensual.count({
       where: { tasa_cero_id: compra.id, estado: 'pagada' },
+      transaction: options.transaction,
     });
 
     if (cuotasPagadas > 0) {

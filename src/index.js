@@ -29,13 +29,22 @@ app.use(helmet({
 
 app.use(compression());
 
+// Define solo el número de proxies confiables del entorno de despliegue.
+if (process.env.TRUST_PROXY_HOPS !== undefined) {
+  const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS, 10);
+  if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0) {
+    throw new Error('TRUST_PROXY_HOPS debe ser un entero igual o mayor que cero.');
+  }
+  app.set('trust proxy', trustProxyHops);
+}
+
 // C2: CORS restringido al origen del frontend
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || 'http://localhost:5173',
-  credentials: true,
+  credentials: false,
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 // C3: Rate limiting solo en /api/auth — máx 10 intentos cada 15 min
 const loginLimiter = rateLimit({
@@ -60,10 +69,21 @@ app.use('/api/egresos',      authMiddleware, require('./routes/egresos'));
 app.use('/api/prestamos',    authMiddleware, require('./routes/prestamos'));
 app.use('/api/creditos',     authMiddleware, require('./routes/creditos'));
 
-// eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(err.status || 500).json({ error: err.message || 'Error interno del servidor' });
+  const mappedErrors = {
+    SequelizeValidationError: { status: 422, message: 'Los datos no cumplen las reglas de validación.' },
+    SequelizeUniqueConstraintError: { status: 409, message: 'Ya existe un registro con esos datos.' },
+    SequelizeForeignKeyConstraintError: { status: 409, message: 'La operación contradice una relación existente.' },
+  };
+  const mapped = mappedErrors[err.name];
+  const status = mapped?.status || (Number.isInteger(err.status) && err.status >= 400 && err.status < 500 ? err.status : 500);
+
+  if (status >= 500) {
+    console.error({ name: err.name, stack: err.stack });
+  }
+
+  const message = mapped?.message || (status >= 500 ? 'Error interno del servidor.' : err.message);
+  res.status(status).json({ error: message });
 });
 
 sequelize.authenticate()

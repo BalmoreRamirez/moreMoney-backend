@@ -2,6 +2,8 @@
 
 const db = require('../models');
 const { Sueldo, CobroSueldo, Inversion, CobroInversion, Cuenta, Transaccion, sequelize } = db;
+const { bloquearRegistros } = require('../utils/bloqueos');
+const { archivarMovimientos } = require('../utils/archivarMovimientos');
 
 // ─── SUELDOS ────────────────────────────────────────────────────────────────
 
@@ -66,15 +68,27 @@ const destroySueldo = async (req, res, next) => {
 const cobrarSueldo = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const sueldo = await Sueldo.findByPk(req.params.id, { include: [{ model: Cuenta, as: 'cuenta' }] });
+    const sueldo = await Sueldo.findByPk(req.params.id, {
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
     if (!sueldo) { await t.rollback(); return res.status(404).json({ error: 'Sueldo no encontrado' }); }
     if (!sueldo.activo) { await t.rollback(); return res.status(422).json({ error: 'Este sueldo está inactivo.' }); }
 
     const { mes, anio } = req.body;
     if (!mes || !anio) { await t.rollback(); return res.status(422).json({ error: 'Se requieren mes y año.' }); }
 
-    const yaExiste = await CobroSueldo.findOne({ where: { sueldo_id: sueldo.id, mes, anio } });
+    const yaExiste = await CobroSueldo.findOne({
+      where: { sueldo_id: sueldo.id, mes, anio },
+      transaction: t,
+    });
     if (yaExiste) { await t.rollback(); return res.status(422).json({ error: `El sueldo ya fue marcado como cobrado en ${mes}/${anio}.` }); }
+
+    const cuentas = await bloquearRegistros(Cuenta, [sueldo.cuenta_id], t);
+    if (!cuentas.has(Number(sueldo.cuenta_id))) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Cuenta de ingreso no encontrada.' });
+    }
 
     const fecha = req.body.fecha_cobro || new Date().toISOString().split('T')[0];
     const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -152,10 +166,11 @@ const storeInversion = async (req, res, next) => {
   try {
     const { nombre, costo_total, precio_esperado, fecha_compra, cuenta_egreso_id } = req.body;
 
-    const cuenta = await Cuenta.findByPk(cuenta_egreso_id);
+    const cuentas = await bloquearRegistros(Cuenta, [cuenta_egreso_id], t);
+    const cuenta = cuentas.get(Number(cuenta_egreso_id));
     if (!cuenta) { await t.rollback(); return res.status(404).json({ error: 'Cuenta de egreso no encontrada' }); }
 
-    const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_egreso_id), sequelize);
+    const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
     if (parseFloat(costo_total) > saldo_actual) {
       await t.rollback();
       return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldo_actual.toFixed(2)}` });
@@ -193,9 +208,7 @@ const storeInversion = async (req, res, next) => {
 const registrarCobro = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const inv = await Inversion.findByPk(req.params.id, {
-      include: [{ model: CobroInversion, as: 'cobros' }],
-    });
+    const inv = await Inversion.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!inv)                    { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
     if (inv.estado === 'vendida'){ await t.rollback(); return res.status(422).json({ error: 'Esta inversión ya está completada.' }); }
 
@@ -222,8 +235,11 @@ const registrarCobro = async (req, res, next) => {
     }, { transaction: t });
 
     // Auto-completar
-    const cobrosAnteriores = inv.cobros || [];
-    const totalCobrado = cobrosAnteriores.reduce((s, c) => s + parseFloat(c.monto), 0) + parseFloat(monto);
+    const cobrosRegistrados = await CobroInversion.findAll({
+      where: { inversion_id: inv.id },
+      transaction: t,
+    });
+    const totalCobrado = cobrosRegistrados.reduce((s, c) => s + parseFloat(c.monto), 0);
     const precioEsperado = inv.precio_esperado != null ? parseFloat(inv.precio_esperado) : null;
     const completar = es_pago_final || (precioEsperado !== null && totalCobrado >= precioEsperado);
 
@@ -251,7 +267,7 @@ const registrarCobro = async (req, res, next) => {
 const updateInversion = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const inv = await Inversion.findByPk(req.params.id);
+    const inv = await Inversion.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!inv) { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
 
     const { nombre, precio_esperado, fecha_compra } = req.body;
@@ -282,14 +298,26 @@ const updateInversion = async (req, res, next) => {
 const resetearInversion = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const inv = await Inversion.findByPk(req.params.id, {
-      include: [{ model: CobroInversion, as: 'cobros' }],
-    });
+    const inv = await Inversion.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!inv) { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
     if (inv.estado !== 'vendida') { await t.rollback(); return res.status(422).json({ error: 'La inversión no está en estado vendida.' }); }
 
-    const cobroIds = (inv.cobros || []).map(c => c.id);
+    const cobros = await CobroInversion.findAll({ where: { inversion_id: inv.id }, transaction: t });
+    const cobroIds = cobros.map(c => c.id);
     if (cobroIds.length) {
+      const cuentasAgrupadas = cobros.reduce((acumulado, cobro) => {
+        acumulado[cobro.cuenta_id] = (acumulado[cobro.cuenta_id] || 0) + parseFloat(cobro.monto);
+        return acumulado;
+      }, {});
+      const cuentas = await bloquearRegistros(Cuenta, Object.keys(cuentasAgrupadas), t);
+      for (const [cuentaId, montoARevertir] of Object.entries(cuentasAgrupadas)) {
+        const cuenta = cuentas.get(Number(cuentaId));
+        const { saldo_actual } = await Cuenta.calcularSaldo(cuenta.id, sequelize, t);
+        if (montoARevertir > saldo_actual + 0.001) {
+          await t.rollback();
+          return res.status(422).json({ error: 'No se puede restablecer la inversión: alguna cuenta no conserva los cobros que deben revertirse.' });
+        }
+      }
       await Transaccion.destroy({ where: { referencia_tipo: 'cobro_inversion', referencia_id: cobroIds }, transaction: t });
       await CobroInversion.destroy({ where: { id: cobroIds }, transaction: t });
     }
@@ -315,16 +343,27 @@ const destroyInversion = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const inv = await Inversion.findByPk(req.params.id, {
-      include: [{ model: CobroInversion, as: 'cobros' }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
     });
     if (!inv) { await t.rollback(); return res.status(404).json({ error: 'Inversión no encontrada' }); }
     if (inv.estado === 'vendida') { await t.rollback(); return res.status(422).json({ error: 'No se puede eliminar una inversión ya vendida.' }); }
-    if (inv.cobros?.length)       { await t.rollback(); return res.status(422).json({ error: 'No se puede eliminar una inversión con cobros registrados.' }); }
+    const cobros = await CobroInversion.count({ where: { inversion_id: inv.id }, transaction: t });
+    if (cobros > 0) { await t.rollback(); return res.status(422).json({ error: 'No se puede eliminar una inversión con cobros registrados.' }); }
 
-    // A1: Revertir la transacción de egreso generada al crear la inversión
-    await Transaccion.destroy({
-      where: { referencia_tipo: 'inversion', referencia_id: inv.id },
+    const movimientos = await Transaccion.findAll({
+      where: { tipo: 'egreso', referencia_tipo: 'inversion', referencia_id: inv.id },
       transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (movimientos.length === 0) {
+      await t.rollback();
+      return res.status(409).json({ error: 'No se puede eliminar: falta el movimiento contable asociado a la inversión. Revisa la integridad de la cuenta.' });
+    }
+
+    // Archivar conserva el egreso: borrar la ficha no reintegra el costo de la inversión.
+    await archivarMovimientos(movimientos, {
+      tipo: 'inversion_archivada', entidad: 'inversión', entidadId: inv.id, transaction: t,
     });
 
     await inv.destroy({ transaction: t });

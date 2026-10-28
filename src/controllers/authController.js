@@ -8,8 +8,11 @@ exports.login = async (req, res, next) => {
   try {
     const { usuario, contrasena } = req.body;
 
-    if (!usuario || !contrasena) {
+    if (typeof usuario !== 'string' || typeof contrasena !== 'string' || !usuario || !contrasena) {
       return res.status(400).json({ error: 'Usuario y contraseña son requeridos.' });
+    }
+    if (usuario.length > 255 || Buffer.byteLength(contrasena, 'utf8') > 72) {
+      return res.status(400).json({ error: 'Usuario o contraseña inválidos.' });
     }
 
     const user = await Usuario.findOne({
@@ -25,7 +28,7 @@ exports.login = async (req, res, next) => {
     const token = jwt.sign(
       { id: user.id, usuario: user.usuario, correo: user.correo },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+      { algorithm: 'HS256', expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
     );
 
     return res.json({

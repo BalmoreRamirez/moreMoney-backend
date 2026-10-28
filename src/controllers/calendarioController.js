@@ -3,6 +3,7 @@
 const { Op } = require('sequelize');
 const db = require('../models');
 const { Tarjeta, CompraNormal, CompraTasaCero, CuotaMensual, Cuenta, Transaccion, sequelize } = db;
+const { bloquearRegistros } = require('../utils/bloqueos');
 
 function monthRange(year, month) {
   const lastDay     = new Date(year, month, 0).getDate();
@@ -172,7 +173,8 @@ const confirmarPago = async (req, res, next) => {
     const monthInt = parseInt(month);
     const { fechaInicio, fechaFin } = monthRange(yearInt, monthInt);
 
-    const tarjeta = await Tarjeta.findByPk(tarjeta_id, { transaction: t });
+    const tarjetas = await bloquearRegistros(Tarjeta, [tarjeta_id], t);
+    const tarjeta = tarjetas.get(Number(tarjeta_id));
     if (!tarjeta) {
       await t.rollback();
       return res.status(404).json({ error: 'Tarjeta no encontrada' });
@@ -211,9 +213,11 @@ const confirmarPago = async (req, res, next) => {
       await t.rollback();
       return res.status(422).json({ error: 'Se debe seleccionar una cuenta desde donde realizar el pago.' });
     }
+    let cuentaPago = null;
     if (cuenta_id) {
-      const cuenta = await Cuenta.findByPk(cuenta_id, { transaction: t });
-      if (!cuenta) {
+      const cuentas = await bloquearRegistros(Cuenta, [cuenta_id], t);
+      cuentaPago = cuentas.get(Number(cuenta_id));
+      if (!cuentaPago) {
         await t.rollback();
         return res.status(404).json({ error: 'Cuenta no encontrada' });
       }
@@ -221,7 +225,7 @@ const confirmarPago = async (req, res, next) => {
 
     // C1 — Validar saldo disponible antes de debitar
     if (total > 0 && cuenta_id) {
-      const { saldo_actual } = await Cuenta.calcularSaldo(parseInt(cuenta_id), sequelize);
+      const { saldo_actual } = await Cuenta.calcularSaldo(cuentaPago.id, sequelize, t);
       if (total > saldo_actual) {
         await t.rollback();
         return res.status(422).json({

@@ -6,11 +6,13 @@
     "start": "sequelize-cli db:migrate && node src/index.js",
     "dev": "nodemon src/index.js",
     "db:migrate": "sequelize-cli db:migrate",
+    "db:migrate:test": "NODE_ENV=test sequelize-cli db:migrate",
     "db:migrate:undo": "sequelize-cli db:migrate:undo:all",
     "db:seed": "sequelize-cli db:seed:all",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test/financial-invariants.test.js",
+    "test:integration": "node test/integration-financial-flows.js"
   },
   "keywords": [],
   "author": "",
