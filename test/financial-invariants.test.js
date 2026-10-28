@@ -28,36 +28,19 @@ test('conversiones de centavos mantienen el importe a dos decimales', () => {
   assert.equal(aCentavos('no es monto'), NaN);
 });
 
-test('el saldo del préstamo solo acumula interés al cumplir cada aniversario mensual', () => {
+test('el préstamo aplica el porcentaje de interés una sola vez sobre el capital', () => {
   const prestamo = {
-    capital: '1000.00',
-    tasa_interes_mensual: '0.0500',
-    fecha_inicio: '2024-01-15',
+    capital: '200.00',
+    tasa_interes_mensual: '0.2000',
   };
-  const pagos = [{ monto: '75.00' }];
-
-  const antesDelSegundoAniversario = calcularSaldoPrestamo(
-    prestamo,
-    pagos,
-    new Date('2024-03-14T12:00:00'),
-  );
-  assert.deepEqual(antesDelSegundoAniversario, {
-    meses_transcurridos: 1,
-    interes_generado: 50,
-    total_deuda: 1050,
-    total_pagado: 75,
-    saldo_pendiente: 975,
-    ganancia: -925,
+  const saldo = calcularSaldoPrestamo(prestamo, [{ monto: '100.00' }]);
+  assert.deepEqual(saldo, {
+    interes_generado: 40,
+    total_deuda: 240,
+    total_pagado: 100,
+    saldo_pendiente: 140,
+    ganancia: -100,
   });
-
-  const enElSegundoAniversario = calcularSaldoPrestamo(
-    prestamo,
-    pagos,
-    new Date('2024-03-15T12:00:00'),
-  );
-  assert.equal(enElSegundoAniversario.meses_transcurridos, 2);
-  assert.equal(enElSegundoAniversario.interes_generado, 100);
-  assert.equal(enElSegundoAniversario.saldo_pendiente, 1025);
 });
 
 test('el cálculo de crédito de tarjeta descuenta cuotas pagadas del saldo usado', () => {

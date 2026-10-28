@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../models');
+const { Op } = require('sequelize');
 const { Prestamo, PagoPrestamo, Cuenta, Transaccion, sequelize } = db;
 const { bloquearRegistros } = require('../utils/bloqueos');
 const { parsearCentavos, aCentavos, desdeCentavos } = require('../utils/montos');
@@ -87,7 +88,7 @@ const store = async (req, res, next) => {
   } catch (err) { await t.rollback(); next(err); }
 };
 
-// PUT /api/prestamos/:id  — solo si no tiene pagos
+// PUT /api/prestamos/:id  — permite editar préstamos activos con abonos
 const update = async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
@@ -96,48 +97,108 @@ const update = async (req, res, next) => {
       lock: t.LOCK.UPDATE,
     });
     if (!prestamo) { await t.rollback(); return res.status(404).json({ error: 'Préstamo no encontrado' }); }
-
-    const pagosExistentes = await PagoPrestamo.count({ where: { prestamo_id: prestamo.id }, transaction: t });
-    if (pagosExistentes > 0) {
+    if (prestamo.estado === 'pagado') {
       await t.rollback();
-      return res.status(422).json({ error: 'No se puede editar un préstamo con abonos registrados.' });
+      return res.status(422).json({ error: 'No se puede editar un préstamo pagado.' });
     }
 
     const { deudor_nombre, deudor_contacto, capital, tasa_interes_mensual, fecha_inicio, dias_duracion, cuenta_id } = req.body;
-
-    // Verificar saldo: revertir el egreso original y chequear si alcanza el nuevo capital
-    const capitalAnterior = parseFloat(prestamo.capital);
-    const nuevoCapital    = parseFloat(capital);
-    const cuentas = await bloquearRegistros(Cuenta, [prestamo.cuenta_id, cuenta_id], t);
-    if (!cuentas.has(Number(cuenta_id))) {
+    const nuevoCapitalCentavos = parsearCentavos(capital);
+    if (nuevoCapitalCentavos == null || nuevoCapitalCentavos <= 0) {
       await t.rollback();
-      return res.status(404).json({ error: 'Cuenta no encontrada' });
+      return res.status(422).json({ error: 'El capital debe ser positivo y tener como máximo dos decimales.' });
     }
-    const { saldo_actual } = await Cuenta.calcularSaldo(Number(cuenta_id), sequelize, t);
-    // saldo disponible = saldo_actual + lo que ya salió por este préstamo (si la cuenta es la misma)
-    const mismaCuenta   = parseInt(prestamo.cuenta_id) === parseInt(cuenta_id);
-    const saldoEfectivo = mismaCuenta ? saldo_actual + capitalAnterior : saldo_actual;
-
-    if (nuevoCapital > saldoEfectivo) {
+    const nuevoCapital = desdeCentavos(nuevoCapitalCentavos);
+    const pagosExistentes = await PagoPrestamo.findAll({ where: { prestamo_id: prestamo.id }, transaction: t });
+    const saldoRecalculado = calcularSaldoPrestamo(
+      { ...prestamo.toJSON(), capital: nuevoCapital, tasa_interes_mensual },
+      pagosExistentes,
+    );
+    if (aCentavos(saldoRecalculado.saldo_pendiente) < 0) {
       await t.rollback();
-      return res.status(422).json({ error: `Saldo insuficiente. Disponible: $${saldoEfectivo.toFixed(2)}` });
+      return res.status(422).json({ error: 'La nueva deuda no puede ser menor al total de abonos registrados.' });
     }
 
-    await prestamo.update(
-      { deudor_nombre, deudor_contacto: deudor_contacto || null, capital, tasa_interes_mensual, fecha_inicio, dias_duracion: dias_duracion || null, cuenta_id },
-      { transaction: t },
-    );
+    const movimientoPrestamo = await Transaccion.findOne({
+      where: { referencia_tipo: 'prestamo', referencia_id: prestamo.id, tipo: 'egreso' },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    if (!movimientoPrestamo) {
+      await t.rollback();
+      return res.status(409).json({ error: 'No se puede editar: falta el movimiento contable asociado al préstamo.' });
+    }
 
-    // Actualizar la transacción de egreso vinculada
-    await Transaccion.update(
-      {
-        cuenta_id,
-        monto:       nuevoCapital,
-        descripcion: `Préstamo a ${deudor_nombre}`,
-        fecha:       fecha_inicio,
-      },
-      { where: { referencia_tipo: 'prestamo', referencia_id: prestamo.id }, transaction: t },
-    );
+    const pagosIds = pagosExistentes.map((pago) => pago.id);
+    const movimientosAbonos = pagosIds.length
+      ? await Transaccion.findAll({
+          where: { referencia_tipo: 'pago_prestamo', referencia_id: { [Op.in]: pagosIds } },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        })
+      : [];
+    const movimientosPorPago = new Set(movimientosAbonos.map((movimiento) => Number(movimiento.referencia_id)));
+    if (pagosIds.some((id) => !movimientosPorPago.has(Number(id)))) {
+      await t.rollback();
+      return res.status(409).json({ error: 'No se puede editar: falta un movimiento contable asociado a un abono.' });
+    }
+
+    const cuentaDestinoId = Number(cuenta_id);
+    const cuentaIdsAfectadas = [
+      movimientoPrestamo.cuenta_id,
+      cuentaDestinoId,
+      ...movimientosAbonos.map((movimiento) => movimiento.cuenta_id),
+    ];
+    const cuentas = await bloquearRegistros(Cuenta, cuentaIdsAfectadas, t);
+    if (cuentaIdsAfectadas.some((id) => !cuentas.has(Number(id)))) {
+      await t.rollback();
+      return res.status(404).json({ error: 'No se encontró una de las cuentas involucradas.' });
+    }
+
+    // Verificar los saldos finales tras mover el egreso y todos sus abonos a la cuenta elegida.
+    const deltasCentavos = new Map();
+    const sumarDelta = (id, delta) => deltasCentavos.set(Number(id), (deltasCentavos.get(Number(id)) || 0) + delta);
+    const capitalAnteriorCentavos = aCentavos(prestamo.capital);
+    sumarDelta(movimientoPrestamo.cuenta_id, capitalAnteriorCentavos);
+    sumarDelta(cuentaDestinoId, -nuevoCapitalCentavos);
+    for (const movimiento of movimientosAbonos) {
+      const montoCentavos = aCentavos(movimiento.monto);
+      sumarDelta(movimiento.cuenta_id, -montoCentavos);
+      sumarDelta(cuentaDestinoId, montoCentavos);
+    }
+
+    for (const [id, delta] of deltasCentavos) {
+      const { saldo_actual: saldoActual } = await Cuenta.calcularSaldo(id, sequelize, t);
+      if (aCentavos(saldoActual) + delta < 0) {
+        await t.rollback();
+        return res.status(422).json({ error: `Saldo insuficiente en la cuenta "${cuentas.get(id).nombre}" para aplicar los cambios.` });
+      }
+    }
+
+    await prestamo.update({
+      deudor_nombre,
+      deudor_contacto: deudor_contacto || null,
+      capital: nuevoCapital,
+      tasa_interes_mensual,
+      fecha_inicio,
+      dias_duracion: dias_duracion || null,
+      cuenta_id: cuentaDestinoId,
+      estado: aCentavos(saldoRecalculado.saldo_pendiente) === 0 ? 'pagado' : 'activo',
+    }, { transaction: t });
+
+    await movimientoPrestamo.update({
+      cuenta_id: cuentaDestinoId,
+      monto: nuevoCapital,
+      descripcion: `Préstamo a ${deudor_nombre}`,
+      fecha: fecha_inicio,
+    }, { transaction: t });
+
+    for (const movimiento of movimientosAbonos) {
+      const descripcion = movimiento.descripcion.startsWith('Pago final préstamo')
+        ? `Pago final préstamo — ${deudor_nombre}`
+        : `Abono préstamo — ${deudor_nombre}`;
+      await movimiento.update({ cuenta_id: cuentaDestinoId, descripcion }, { transaction: t });
+    }
 
     await t.commit();
 

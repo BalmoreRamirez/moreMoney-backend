@@ -467,8 +467,9 @@ test('inversiones cubren alta, edición, cobros, cierre sin duplicar y restablec
   assert.equal(await Transaccion.count({ where: { referencia_tipo: 'cobro_inversion' } }), 0);
 });
 
-test('préstamos cubren edición previa, reversa de abonos y cierre del saldo restante', async (t) => {
+test('préstamos permiten editar con abonos y mantienen cuentas y movimientos consistentes', async (t) => {
   const cuenta = await crearCuenta(500);
+  const cuentaDestino = await crearCuenta(500);
   const alta = await invocar(prestamosController.store, { body: {
     deudor_nombre: 'IT deudor CRUD', capital: 100, tasa_interes_mensual: 0,
     fecha_inicio: '2026-10-28', cuenta_id: cuenta.id,
@@ -477,9 +478,11 @@ test('préstamos cubren edición previa, reversa de abonos y cierre del saldo re
   const prestamoId = alta.data.id;
   t.after(async () => {
     await borrarTransaccionesDeCuenta(cuenta.id);
+    await borrarTransaccionesDeCuenta(cuentaDestino.id);
     await PagoPrestamo.destroy({ where: { prestamo_id: prestamoId } });
     await Prestamo.destroy({ where: { id: prestamoId } });
     await cuenta.destroy();
+    await cuentaDestino.destroy();
   });
 
   const update = await invocar(prestamosController.update, {
@@ -496,29 +499,36 @@ test('préstamos cubren edición previa, reversa de abonos y cierre del saldo re
     params: { id: prestamoId }, body: { monto: 40, fecha_pago: '2026-10-28', nota: 'Primer abono' },
   });
   assert.equal(abono.status, 201);
-  assert.equal((await invocar(prestamosController.update, {
+  const editadoConAbono = await invocar(prestamosController.update, {
     params: { id: prestamoId }, body: {
-      deudor_nombre: 'Cambio bloqueado', capital: 120, tasa_interes_mensual: 0,
-      fecha_inicio: '2026-10-27', cuenta_id: cuenta.id,
+      deudor_nombre: 'IT deudor editado con abono', capital: 120, tasa_interes_mensual: 0,
+      fecha_inicio: '2026-10-27', cuenta_id: cuentaDestino.id,
     },
-  })).status, 422);
+  });
+  assert.equal(editadoConAbono.status, 200);
+  assert.equal(editadoConAbono.data.deudor_nombre, 'IT deudor editado con abono');
+  assert.equal(parseFloat(editadoConAbono.data.total_pagado), 40);
+  assert.equal(parseFloat(editadoConAbono.data.saldo_pendiente), 80);
+  assert.equal((await Cuenta.calcularSaldo(cuenta.id, sequelize)).saldo_actual, 500);
+  assert.equal((await Cuenta.calcularSaldo(cuentaDestino.id, sequelize)).saldo_actual, 420);
   const pagoId = abono.data.pagos[0].id;
   const abonoEditado = await invocar(prestamosController.updateAbono, {
     params: { id: prestamoId, abonoId: pagoId }, body: { monto: 30, fecha_pago: '2026-10-29', nota: 'Corregido' },
   });
   assert.equal(abonoEditado.status, 200);
   assert.equal(parseFloat(abonoEditado.data.total_pagado), 30);
+  assert.equal((await Cuenta.calcularSaldo(cuentaDestino.id, sequelize)).saldo_actual, 410);
   const borrado = await invocar(prestamosController.destroyAbono, { params: { id: prestamoId, abonoId: pagoId } });
   assert.equal(borrado.status, 200);
   assert.equal(borrado.data.total_pagado, 0);
-  assert.equal((await Cuenta.calcularSaldo(cuenta.id, sequelize)).saldo_actual, 380);
+  assert.equal((await Cuenta.calcularSaldo(cuentaDestino.id, sequelize)).saldo_actual, 380);
 
   const cerrado = await invocar(prestamosController.marcarPagado, { params: { id: prestamoId } });
   assert.equal(cerrado.status, 200);
   assert.equal(cerrado.data.estado, 'pagado');
   assert.equal(cerrado.data.total_pagado, 120);
   assert.equal((await invocar(prestamosController.marcarPagado, { params: { id: prestamoId } })).status, 422);
-  assert.equal((await Cuenta.calcularSaldo(cuenta.id, sequelize)).saldo_actual, 500);
+  assert.equal((await Cuenta.calcularSaldo(cuentaDestino.id, sequelize)).saldo_actual, 500);
 });
 
 test('créditos generan cronograma, exigen orden, registran cuotas y revierten alta no pagada', async (t) => {
